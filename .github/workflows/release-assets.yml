@@ -1,0 +1,53 @@
+# Publish release assets from the in-repo releases/ folder.
+#
+# The fine-grained PAT used on this machine cannot upload release assets
+# (POST /releases/{id}/assets -> 404), so the binaries are committed to
+# releases/{version}/ and this workflow attaches them to the matching
+# GitHub release with the default GITHUB_TOKEN (full permissions).
+#
+# Trigger (console-only, no web UI needed):
+#   curl -X POST -H "Authorization: Bearer <PAT>" \
+#     -H "Content-Type: application/json" -d '{"ref":"main","inputs":{"tag":"v0.9.0"}}' \
+#     https://api.github.com/repos/shevchukdp/zakonexport-gui/actions/workflows/release-assets.yml/dispatches
+name: Publish release assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.9.0)"
+        required: true
+        default: "v0.9.0"
+
+permissions:
+  contents: read
+  releases: write
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload assets from releases/<version>/ to the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          BASE="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          AUTH=(-H "Authorization: token $GITHUB_TOKEN" -H "User-Agent: zakonexport-assets")
+          VER="${TAG#v}"
+          REL_ID=$(curl -sf "${AUTH[@]}" "$BASE/releases/tags/$TAG" | jq -r .id)
+          echo "release $TAG id=$REL_ID"
+          shopt -s nullglob
+          files=( "releases/$VER"/* )
+          [ ${#files[@]} -gt 0 ] || { echo "no files in releases/$VER"; exit 1; }
+          for f in "${files[@]}"; do
+            echo "uploading $f"
+            curl -sf "${AUTH[@]}" -H "Content-Type: application/octet-stream" \
+              --data-binary "@$f" \
+              "$BASE/releases/$REL_ID/assets?name=$(basename "$f")" > /dev/null
+          done
+          echo "done"

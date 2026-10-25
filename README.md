@@ -120,10 +120,30 @@ build\run-gui.bat  запуск GUI двойным кликом
 - База читается **только для чтения**; каталог по умолчанию
   `C:\temp\opencode\export`.
 
-## Версии
+## Релізи / Releases
 
-- **v0.10.0** — GDI-друк (системный диалог, `print <docnum>`, кнопка «Друк»),
-  PDF-экспорт (чистый Rust, Arial-сабсет), CLI `print`, формат `pdf` в GUI,
-  51 юнит-тест.
-- **v0.1–v0.9** — ядро: нативное чтение `.mb`, поиск, экспорт
-  md/rtf/docx/html/csv, bulk, фильтры, GUI, реквизиты/extract/signal.
+Історія версій — в **CHANGELOG.md**: кожен запис UA + EN, сторінки
+GitHub-релізу несуть ті самі нотатки (UA + EN).
+Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
+release pages carry the same notes (UK + EN).
+
+Поточний / Current:
+- **v0.10.0** — GDI-друк (системний діалог, `print <docnum>`, кнопка «Друк»),
+  PDF-експорт (чистий Rust, Arial-сабсет), 51 юніт-тест. / GDI printing
+  (system dialog), pure-Rust PDF export (Arial subset), 51 unit tests.
+- **v0.9.0** — ядро: read-only `.db`/`.mb`, пошук (rayon), експорт
+  md/rtf/docx/html/csv, bulk, фільтри, GUI, реквізити/extract/signal;
+  бинарники з іконкою. / Core: read-only `.db`/`.mb`, search (rayon),
+  md/rtf/docx/html/csv export, bulk, filters, GUI, fields/extract/signal;
+  icon-injected binaries.
+- **v0.8.0 / v0.7.0 / v0.6.0 / v0.4.0** — архівні GUI-zip (pre-git) /
+  archived GUI zips (pre-git era).
+- **v0.1–v0.3** — ранні ітерації, бинарників немає / early iterations,
+  no archived binaries.
+
+Процес релізу / Release process: `CHANGELOG.md` (UA+EN) → тег + сторінка
+релізу (UA+EN) → `releases/<v>/` в репо + ассети
+(`.github/workflows/release-assets.yml`; завантаження йде через
+`uploads.github.com`). / `CHANGELOG.md` (UA+EN) → tag + release page
+(UA+EN) → `releases/<v>/` in-repo + assets (uploads go through
+`uploads.github.com`).

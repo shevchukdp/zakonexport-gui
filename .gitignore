@@ -10,6 +10,10 @@ q_*.txt
 *.exe
 *.dll
 *.pdb
+# but release binaries are shipped in-repo (GitHub Releases API asset
+# upload is blocked for this repo's token, so binaries live in releases/)
+!releases/
+!releases/**
 
 # editor / IDE
 .vs/

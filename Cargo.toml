@@ -1,0 +1,36 @@
+[package]
+name = "zakon-exporter"
+version = "0.10.0"
+edition = "2021"
+autobins = false
+
+# two separate executables from the same engine:
+[[bin]]
+name = "zakonexport-cli" # console tool (all verbs; `gui` is a fallback)
+path = "src/main.rs"
+
+[[bin]]
+name = "zakonexport-gui" # double-click -> GUI immediately (no console)
+path = "src/bin/zakonexport-gui.rs"
+
+[dependencies]
+native-windows-gui = "1.0"
+native-windows-derive = "1.0"
+anyhow = "1"
+rayon = "1"
+encoding_rs = "0.8"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# pure-Rust BZip2 backend (libbz2-rs) — no C compiler needed (no bzip2-sys/gcc)
+bzip2 = { version = "0.5", default-features = false, features = ["libbz2-rs-sys"] }
+# pure-Rust inflate (miniz_oxide) for OOXML .docx/.xlsx/.pptx zip entries
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# COM folder picker (IFileDialog + FOS_PICKFOLDERS); same 0.3 line as nwg uses
+[dependencies.winapi]
+version = "0.3"
+features = ["shobjidl", "shobjidl_core", "combaseapi", "objbase", "objidl",
+    "unknwnbase", "wtypesbase", "winerror", "windef", "guiddef", "minwindef", "winuser"]
+
+[profile.release]
+opt-level = 2

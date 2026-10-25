@@ -1,0 +1,16 @@
+# cargo build artifacts (the bulk of the working tree)
+/target
+
+# test / self-test artifacts
+/gt_export/
+gui_ready.txt
+q_*.txt
+
+# build output in-tree (if ever built without a target dir)
+*.exe
+*.dll
+*.pdb
+
+# editor / IDE
+.vs/
+.idea/

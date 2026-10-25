@@ -44,11 +44,14 @@ jobs:
           shopt -s nullglob
           files=( "releases/$TAG"/* )
           [ ${#files[@]} -gt 0 ] || { echo "no files in releases/$TAG"; exit 1; }
+          # NOTE: asset uploads must go to uploads.github.com (the
+          # api.github.com/.../assets URL 404s for this repo)
+          UPL="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$REL_ID/assets"
           for f in "${files[@]}"; do
             echo "uploading $f"
             code=$(curl -s "${AUTH[@]}" -H "Content-Type: application/octet-stream" \
               -w '%{http_code}' --data-binary "@$f" -o /tmp/resp.json \
-              "$BASE/releases/$REL_ID/assets?name=$(basename "$f")")
+              "$UPL?name=$(basename "$f")")
             echo "HTTP $code: $(head -c 300 /tmp/resp.json)"
             [ "$code" = "201" ] || exit 1
           done

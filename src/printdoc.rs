@@ -9,6 +9,8 @@ use std::ffi::c_void;
 use std::os::raw::{c_int, c_long, c_ushort};
 use std::ptr;
 
+use winapi::um::winuser::{GetDC, ReleaseDC};
+
 /// What happened after a `print_text` call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrintOutcome {
@@ -76,9 +78,6 @@ const VERTRES: c_int = 10;
 unsafe extern "system" {
     // comdlg32
     fn PrintDlgW(p: *mut PrintDlg2W) -> i32;
-    // user32
-    fn GetDCW(h: *mut c_void) -> *mut c_void;
-    fn ReleaseDCW(h: *mut c_void, dc: *mut c_void) -> c_int;
     // gdi32
     fn DeleteDC(dc: *mut c_void) -> i32;
     fn GetDeviceCaps(dc: *mut c_void, index: c_int) -> c_int;
@@ -115,9 +114,33 @@ unsafe extern "system" {
     fn StartDocW(dc: *mut c_void, info: *const DocInfoW) -> c_int;
     fn StartPage(dc: *mut c_void) -> i32;
     fn EndPage(dc: *mut c_void) -> i32;
-    fn EndDocW(dc: *mut c_void) -> c_int;
-    // kernel32
+    // kernel32 (runtime resolution of the missing symbols below)
     fn GetLastError() -> u32;
+    fn LoadLibraryW(name: *const u16) -> *mut c_void;
+    fn GetProcAddress(h: *mut c_void, name: *const u8) -> *mut c_void;
+}
+
+/// `EndDocW` (winspool) is absent from the self-contained mingw import
+/// libraries shipped with the x86_64-pc-windows-gnu toolchain, so it is
+/// resolved at runtime. Returns 1 (success) when it cannot be resolved —
+/// GDI cleans the document up when the DC is deleted, so skipping it is
+/// safe (LoadLibraryW keeps winspool loaded; the extra refcount for the
+/// process lifetime is negligible).
+fn end_doc_w(hdc: *mut c_void) -> c_int {
+    unsafe {
+        let name: Vec<u16> = "winspool.dll\0".encode_utf16().collect();
+        let dll = LoadLibraryW(name.as_ptr());
+        if dll.is_null() {
+            return 1;
+        }
+        let p = GetProcAddress(dll, b"EndDocW\0".as_ptr());
+        if p.is_null() {
+            return 1;
+        }
+        type EndDocWFn = unsafe extern "system" fn(*mut c_void) -> c_int;
+        let f: EndDocWFn = std::mem::transmute(p);
+        f(hdc)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,14 +284,14 @@ fn wrap_line(
 pub fn print_text(doc_label: &str, text: &str) -> anyhow::Result<PrintOutcome> {
     // 1) system print dialog: the caller's hDC must be non-null (a dummy
     // screen DC is enough); PD_RETURNDC returns the chosen printer's DC.
-    let dummy = unsafe { GetDCW(ptr::null_mut()) };
+    let dummy = unsafe { GetDC(ptr::null_mut()) as *mut c_void };
     let mut dlg = PrintDlg2W::default(); // zeroed
     dlg.l_struct_size = std::mem::size_of::<PrintDlg2W>() as u32;
     dlg.h_dc = dummy;
     dlg.flags = PD_RETURNDC | PD_NOPROOF;
     let accepted = unsafe { PrintDlgW(&mut dlg) };
     unsafe {
-        let _ = ReleaseDCW(ptr::null_mut(), dummy);
+        let _ = ReleaseDC(ptr::null_mut(), dummy as *mut _);
     }
     if accepted == 0 {
         return Ok(PrintOutcome::Cancelled);
@@ -332,7 +355,7 @@ pub fn print_text(doc_label: &str, text: &str) -> anyhow::Result<PrintOutcome> {
                     if !in_page {
                         if StartPage(hdc) == 0 {
                             let e = GetLastError();
-                            let _ = EndDocW(hdc);
+                            let _ = end_doc_w(hdc);
                             anyhow::bail!("StartPage: помилка {e}");
                         }
                         in_page = true;
@@ -342,7 +365,7 @@ pub fn print_text(doc_label: &str, text: &str) -> anyhow::Result<PrintOutcome> {
                         let _ = EndPage(hdc);
                         if StartPage(hdc) == 0 {
                             let e = GetLastError();
-                            let _ = EndDocW(hdc);
+                            let _ = end_doc_w(hdc);
                             anyhow::bail!("StartPage: помилка {e}");
                         }
                         y = margin;
@@ -365,7 +388,7 @@ pub fn print_text(doc_label: &str, text: &str) -> anyhow::Result<PrintOutcome> {
             if in_page {
                 let _ = EndPage(hdc);
             }
-            if EndDocW(hdc) == 0 {
+            if end_doc_w(hdc) == 0 {
                 let e = GetLastError();
                 anyhow::bail!("EndDoc: помилка {e}");
             }

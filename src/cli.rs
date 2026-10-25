@@ -20,16 +20,16 @@ Usage:
   zakonexport-cli gui [--guitest] [--base general|audit|<path>] [--baza <path>]
   zakonexport-cli search <query> [--number] [--max n] [--fields] [search flags]
   zakonexport-cli export <query> [search flags] [--number] [filters] [--format md|rtf|docx|html|csv|pdf]
-        [--out dir] [--docs n1,n2-n5 | --pick]
+        [--out dir] [--docs n1,n2-n5 | --pick] [--single]
   zakonexport-cli export --docs 136974,222-225 [--format docx] [--out dir]
          (md/rtf/docx/html/pdf = one file per document, format-preserving layout;
-          pdf embeds a subset of the system Arial font;
+          pdf embeds a subset of the auto-picked system font (Cyrillic fallback);
           csv = a single results-table file for the whole hit set)
   zakonexport-cli fields <docnum>
   zakonexport-cli extract <docnum>
   zakonexport-cli signal <docnum>   locate the doc's signal attachment (if any)
   zakonexport-cli print <docnum>    GDI print (system print dialog, no Word)
-  zakonexport-cli bulk [--format md|rtf|docx|html|csv|pdf] [--out dir] [--max n]
+  zakonexport-cli bulk [--format md|rtf|docx|html|csv|pdf] [--out dir] [--max n] [--single]
   zakonexport-cli stats
   zakonexport-cli about   (= --version: name, version, copyright)
 
@@ -64,6 +64,10 @@ Signal docs (export only):
   --attach                  also copy each doc's signal attachment (додаток /
                 Word-вложение) from <baza>\\signal\\<docnum>.<ext> into the
                 export folder and note it in the report (md/rtf/docx)
+  --single (зв'язка)      all exported documents into ONE file (md/rtf/docx/
+                 html/pdf; csv is already one file). The bundle is named
+                 bundle-<count>-<first docnum>.<ext>; pdf gets a /Outlines
+                 table of contents and each document starts on a fresh page
 
 --base general  = C:\\Zakon.Local\\Baza (загальне законодавство)
 --base audit    = C:\\Zakon.Local\\Baza.GK (Держаудитслужба / ГоловКРУ)
@@ -103,6 +107,8 @@ struct Options {
     listfile: Option<PathBuf>,
     /// include signal attachments (додатки / Word-вложения) in export
     attach: bool,
+    /// "зв'язка": all the documents into ONE file (md/rtf/docx/html/pdf)
+    single: bool,
 }
 
 fn parse_args() -> Options {
@@ -130,6 +136,7 @@ fn parse_args() -> Options {
         queryfile: None,
         listfile: None,
         attach: false,
+        single: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -228,6 +235,10 @@ fn parse_args() -> Options {
             }
             "--attach" | "--signal" | "--dodatk" => {
                 o.attach = true;
+                i += 1;
+            }
+            "--single" | "--zvizka" => {
+                o.single = true;
                 i += 1;
             }
             "--queryfile" if next(i).is_some() => {
@@ -683,9 +694,15 @@ pub fn main_cli() {
                 writers::export_hits(&o.baza, &sel, &o.format, &naming, Some(&|d, t| {
                     eprint!("\rexport {d}/{t}  ");
                     let _ = std::io::stderr().flush();
-                }), o.attach)?;
+                }), o.attach, o.single)?;
             eprintln!();
-            if o.attach {
+            if o.single {
+                if o.attach {
+                    println!("зв'язка: {n} документи -> 1 файл, {a} додатків -> {}", out.display());
+                } else {
+                    println!("зв'язка: {n} документи -> 1 файл: {}", out.display());
+                }
+            } else if o.attach {
                 println!("exported {n} files, {a} signal attachments -> {}", out.display());
             } else {
                 println!("exported {n} files to {}", out.display());
@@ -716,9 +733,11 @@ pub fn main_cli() {
                 writers::export_hits(&o.baza, &all, &o.format, &naming, Some(&|d, t| {
                     eprint!("\rexport {d}/{t}   ");
                     let _ = std::io::stderr().flush();
-                }), o.attach)?;
+                }), o.attach, o.single)?;
             eprintln!();
-            if o.attach {
+            if o.single {
+                println!("зв'язка: {n} документи -> 1 файл: {}", out.display());
+            } else if o.attach {
                 println!("exported {n} files, {a} signal attachments -> {}", out.display());
             } else {
                 println!("exported {n} files to {}", out.display());

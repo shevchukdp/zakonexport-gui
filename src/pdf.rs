@@ -20,6 +20,89 @@ pub fn default_font_path() -> PathBuf {
     Path::new(r"C:\Windows\Fonts\arial.ttf").to_path_buf()
 }
 
+/// Font candidates, in preference order. Some systems ship an "aged"
+/// arial.ttf whose cmap points past its own glyph table (Cyrillic lands
+/// in .notdef); a Times/Cambria/... fallback covers that case.
+const FONT_CANDIDATES: &[&str] = &[
+    "arial.ttf",
+    "times.ttf",
+    "cambria.ttf",
+    "georgia.ttf",
+    "tahoma.ttf",
+    "verdana.ttf",
+];
+
+fn font_file(name: &str) -> PathBuf {
+    Path::new(r"C:\Windows\Fonts").join(name)
+}
+
+/// Parsed candidates, cached for the process (parsing six TTFs per export
+/// document would be wasteful).
+static CANDIDATES: std::sync::OnceLock<Vec<(String, Option<TtfFont>)>> =
+    std::sync::OnceLock::new();
+
+fn cached_candidates() -> &'static Vec<(String, Option<TtfFont>)> {
+    CANDIDATES.get_or_init(|| {
+        FONT_CANDIDATES
+            .iter()
+            .map(|n| {
+                let p = font_file(n);
+                let f = std::fs::read(&p).ok().and_then(|raw| parse(&raw).ok());
+                (n.to_string(), f)
+            })
+            .collect()
+    })
+}
+
+/// Pick the system font that covers `codes` (the distinct codepoints the
+/// export text needs): the first candidate in preference order that
+/// covers them ALL; otherwise the candidate with the best coverage; the
+/// default arial when nothing parses. Clamped/stale mappings (gid past
+/// the font's own table) count as "not covered" — that is exactly the
+/// quirk this selection heals.
+pub fn select_font(codes: &std::collections::HashSet<u32>) -> PathBuf {
+    let mut best: Option<(PathBuf, u64)> = None;
+    for (name, f) in cached_candidates() {
+        let Some(f) = f.as_ref() else {
+            continue;
+        };
+        let covered = codes
+            .iter()
+            .filter(|cp| f.cmap.lookup(**cp) != 0)
+            .count() as u64;
+        let total = codes.len() as u64;
+        if total > 0 && covered == total {
+            return font_file(name); // full coverage, preferred order wins
+        }
+        match &best {
+            Some((_, c)) if covered <= *c => {}
+            _ => best = Some((font_file(name), covered)),
+        }
+    }
+    best.map(|(p, _)| p).unwrap_or_else(default_font_path)
+}
+
+/// Distinct codepoints of `s` (for select_font).
+pub fn code_points(s: &str) -> std::collections::HashSet<u32> {
+    s.chars().map(|c| c as u32).collect()
+}
+
+/// How many of `codes` a system font file actually maps to a real (non-zero,
+/// in-range) glyph: `(covered, total)`. `(0,0)` when the file is missing or
+/// unparseable. Useful to see why a given font was (or wasn't) selected.
+pub fn font_coverage(font_path: &Path, codes: &std::collections::HashSet<u32>) -> (u64, u64) {
+    let raw = match std::fs::read(font_path) {
+        Ok(r) => r,
+        Err(_) => return (0, 0),
+    };
+    let f = match parse(&raw) {
+        Ok(f) => f,
+        Err(_) => return (0, 0),
+    };
+    let covered = codes.iter().filter(|cp| f.cmap.lookup(**cp) != 0).count() as u64;
+    (covered, codes.len() as u64)
+}
+
 // ---------------------------------------------------------------------------
 // big-endian readers
 // ---------------------------------------------------------------------------
@@ -827,6 +910,57 @@ fn pdf_string(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Wrap one logical line (word wrap at the printable width) into the
+/// pager, emitting encoded pieces as needed.
+fn emit_line_wrapped(
+    pager: &mut Pager,
+    line: &str,
+    byte_of: &[u8; 65536],
+    gid_of_byte: &[u16; 256],
+    sub: &SubsetFont,
+) {
+    let pt_per_unit = FONT_SIZE / sub.units_per_em as f64;
+    let avail = PAGE_W - 2.0 * MARGIN_X;
+    let space_w = sub.widths[gid_of_byte[32] as usize] as f64 * pt_per_unit;
+    let mut seg: Vec<u8> = Vec::new(); // encoded bytes of the current line piece
+    let mut cur_w = 0.0f64;
+    for w in line.split(' ') {
+        if w.is_empty() {
+            continue;
+        }
+        let w_units: f64 = w
+            .chars()
+            .map(|c| {
+                let cp = c as u32;
+                let b = if cp < 65536 {
+                    byte_of[cp as usize]
+                } else {
+                    32
+                };
+                sub.widths[gid_of_byte[b as usize] as usize] as f64
+            })
+            .sum();
+        let add = w_units * pt_per_unit;
+        let sep = if seg.is_empty() { 0.0 } else { space_w };
+        if cur_w > 0.0 && cur_w + sep + add > avail {
+            if !seg.is_empty() {
+                seg.push(32); // the wrap point
+            }
+            pager.emit(&seg);
+            seg.clear();
+            cur_w = 0.0;
+        }
+        for c in w.chars() {
+            let cp = c as u32;
+            seg.push(if cp < 65536 { byte_of[cp as usize] } else { 32 });
+        }
+        cur_w += if cur_w == 0.0 { add } else { add + sep };
+    }
+    if !seg.is_empty() || line.is_empty() {
+        pager.emit(&seg);
+    }
+}
+
 /// Wrap + paginate the lines into PDF content streams (one per page),
 /// using the subset encoding (char → byte) and hmtx widths.
 fn content_streams(sub: &SubsetFont, lines: &[&str]) -> Vec<Vec<u8>> {
@@ -840,51 +974,41 @@ fn content_streams(sub: &SubsetFont, lines: &[&str]) -> Vec<Vec<u8>> {
     for &(_, b, g) in &sub.chars {
         gid_of_byte[b as usize] = g;
     }
-    let pt_per_unit = FONT_SIZE / sub.units_per_em as f64;
-    let avail = PAGE_W - 2.0 * MARGIN_X;
-    let space_w = sub.widths[gid_of_byte[32] as usize] as f64 * pt_per_unit;
 
     let mut pager = Pager::new();
     for line in lines {
-        let mut seg: Vec<u8> = Vec::new(); // encoded bytes of the current line piece
-        let mut cur_w = 0.0f64;
-        for w in line.split(' ') {
-            if w.is_empty() {
-                continue;
-            }
-            let w_units: f64 = w
-                .chars()
-                .map(|c| {
-                    let cp = c as u32;
-                    let b = if cp < 65536 {
-                        byte_of[cp as usize]
-                    } else {
-                        32
-                    };
-                    sub.widths[gid_of_byte[b as usize] as usize] as f64
-                })
-                .sum();
-            let add = w_units * pt_per_unit;
-            let sep = if seg.is_empty() { 0.0 } else { space_w };
-            if cur_w > 0.0 && cur_w + sep + add > avail {
-                if !seg.is_empty() {
-                    seg.push(32); // the wrap point
-                }
-                pager.emit(&seg);
-                seg.clear();
-                cur_w = 0.0;
-            }
-            for c in w.chars() {
-                let cp = c as u32;
-                seg.push(if cp < 65536 { byte_of[cp as usize] } else { 32 });
-            }
-            cur_w += if cur_w == 0.0 { add } else { add + sep };
-        }
-        if !seg.is_empty() || line.is_empty() {
-            pager.emit(&seg);
-        }
+        emit_line_wrapped(&mut pager, line, &byte_of, &gid_of_byte, sub);
     }
     pager.finish()
+}
+
+/// Like content_streams, but the documents are independent blocks: each
+/// block (one source document) always STARTS ON A NEW PAGE. Returns the
+/// streams plus, per document, the 1-based page index where it begins
+/// (for the /Outlines table of contents).
+fn content_streams_docs(sub: &SubsetFont, blocks: &[Vec<String>]) -> (Vec<Vec<u8>>, Vec<usize>) {
+    let mut byte_of: [u8; 65536] = [32; 65536];
+    for &(cp, b, _) in &sub.chars {
+        byte_of[cp as usize] = b;
+    }
+    let mut gid_of_byte: [u16; 256] = [0; 256];
+    for &(_, b, g) in &sub.chars {
+        gid_of_byte[b as usize] = g;
+    }
+
+    let mut pager = Pager::new();
+    let mut starts: Vec<usize> = Vec::with_capacity(blocks.len());
+    for (i, block) in blocks.iter().enumerate() {
+        if i > 0 {
+            pager.end_page(); // every document opens a fresh page
+        }
+        // the page the next emit will open (0-based pages.len() + 1)
+        starts.push(pager.pages.len() + 1);
+        for line in block {
+            emit_line_wrapped(&mut pager, line, &byte_of, &gid_of_byte, sub);
+        }
+    }
+    (pager.finish(), starts)
 }
 
 /// Page state: opens a content stream (BT/Td) at the top of a new page and
@@ -1105,13 +1229,238 @@ pub fn write_pdf_with_font(path: &Path, title: &str, lines: &[&str], font_path: 
     Ok(())
 }
 
-/// Write one document to `path` as a minimal PDF (default system font).
+/// Write one document to `path` as a minimal PDF. The font is picked
+/// automatically (select_font over the text's codepoints): a system font
+/// that actually carries the used glyphs (Cyrillic-capable fallback when
+/// the local arial.ttf is "stale"), defaulting to arial.ttf.
 pub fn write_pdf(path: &Path, title: &str, lines: &[&str]) -> Result<()> {
-    let font_path = default_font_path();
-    if !font_path.exists() {
-        bail!("PDF font not found: {} (Arial)", font_path.display());
+    let mut codes = code_points(title);
+    for line in lines {
+        codes.extend(code_points(line));
     }
+    let font_path = select_font(&codes);
     write_pdf_with_font(path, title, lines, &font_path)
+}
+
+/// UTF-16BE + BOM as a PDF hex string body (for /Title and outline titles).
+fn title_hex(title: &str) -> String {
+    let u16: Vec<u16> = title.encode_utf16().collect();
+    let mut hex = String::with_capacity(4 + 4 * u16.len());
+    for b in &0xFEFFu16.to_be_bytes() {
+        hex.push_str(&format!("{b:02X}"));
+    }
+    for u in &u16 {
+        for b in &u.to_be_bytes() {
+            hex.push_str(&format!("{b:02X}"));
+        }
+    }
+    hex
+}
+
+/// One document of a multi-document PDF bundle (a source document's
+/// rendered head lines + text; each gets its own start page + outline entry).
+pub struct PdfDoc<'a> {
+    pub title: &'a str,
+    pub head_lines: &'a [String],
+    pub text: &'a str,
+}
+
+/// Write several documents to ONE PDF: every document starts on a fresh
+/// page and gets a /Outlines table-of-contents entry (PDF bookmarks).
+/// The embedded font subset covers the union of all documents' characters
+/// (auto-picked by select_font).
+pub fn write_pdf_bundle(path: &Path, docs: &[PdfDoc]) -> Result<()> {
+    if docs.is_empty() {
+        bail!("no documents for the PDF bundle");
+    }
+    // the subset must carry every character of every document
+    let all_text: String = docs
+        .iter()
+        .map(|d| d.text)
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let codes: std::collections::HashSet<u32> = docs
+        .iter()
+        .flat_map(|d| {
+            d.title
+                .chars()
+                .chain(d.head_lines.iter().flat_map(|l| l.chars()))
+                .chain(d.text.chars())
+        })
+        .map(|c| c as u32)
+        .collect();
+    let font_path = select_font(&codes);
+    let raw = std::fs::read(&font_path)
+        .with_context(|| format!("read font {}", font_path.display()))?;
+    let font = parse(&raw)?;
+    let sub = subset_font(&font, &all_text)?;
+
+    // per-document line blocks (head + body), fresh page each
+    let blocks: Vec<Vec<String>> = docs
+        .iter()
+        .map(|d| {
+            let mut l: Vec<String> = Vec::new();
+            l.push(d.title.to_string());
+            l.extend(d.head_lines.iter().cloned());
+            l.push(String::new());
+            l.extend(d.text.lines().map(|s| s.to_string()));
+            l
+        })
+        .collect();
+    let (streams, starts) = content_streams_docs(&sub, &blocks);
+    let mut streams = streams;
+    if streams.is_empty() {
+        streams.push(Vec::new());
+    }
+    let np = streams.len().max(1);
+    let ndoc = docs.len();
+    let with_outline = ndoc > 1;
+
+    // ---- font objects ----------------------------------------------------
+    let base_font = font_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Arial".to_string());
+    let mut diff: Vec<String> = Vec::new();
+    for b in 32..=sub.last_char {
+        let g = sub
+            .chars
+            .iter()
+            .find(|c| c.1 == b)
+            .map(|c| c.2)
+            .unwrap_or(0);
+        diff.push(format!("{b} /{}", sub.glyph_names[g as usize]));
+    }
+    let widths: Vec<u16> = (32..=sub.last_char)
+        .map(|b| {
+            let g = sub
+                .chars
+                .iter()
+                .find(|c| c.1 == b)
+                .map(|c| c.2)
+                .unwrap_or(0);
+            sub.widths[g as usize]
+        })
+        .collect();
+    let widths_pdf: Vec<String> = widths.iter().map(|w| w.to_string()).collect();
+    let font_file: Vec<u8> = {
+        use flate2::{write::DeflateEncoder, Compression};
+        use std::io::Write;
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(&sub.font_bytes)?;
+        enc.finish()?
+    };
+
+    // ---- object layout ---------------------------------------------------
+    // 1 Catalog, 2 Pages, 3 Font, 4 FontDescriptor, 5 FontFile2, 6 Info,
+    // 7..(6+np) Pages, (7+np)..(7+2np-1) contents, then (outline only):
+    // (7+2np) Outlines root, (7+2np+1)..(+ndoc) entries
+    let kids: Vec<String> = (7..(7 + np)).map(|i| format!("{i} 0 R")).collect();
+    let outlines_root = 7 + 2 * np; // 1-based object number
+    let entry_first = outlines_root + 1;
+
+    let mut objects: Vec<String> = vec![
+        if with_outline {
+            format!(
+                "<< /Type /Catalog /Pages 2 0 R /Outlines {outlines_root} 0 R >>"
+            )
+        } else {
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string()
+        },
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {np} >>",
+            kids.join(" ")
+        ),
+        format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /{} /Encoding \
+              <</Differences [{}]>> /FirstChar 32 /LastChar {} /Widths [{}] \
+              /FontDescriptor 4 0 R >>",
+            base_font,
+            diff.join(" "),
+            sub.last_char,
+            widths_pdf.join(" ")
+        ),
+        format!(
+            "<< /Type /FontDescriptor /FontName /{} /Flags 35 /StemV 80 \
+              /ItalicAngle {} /Ascent {} /Descent {} /FontFile2 5 0 R >>",
+            base_font, sub.italic_angle, sub.ascent, sub.descent
+        ),
+        String::new(), // the font-file stream (filled below)
+        "<< /CreationDate (zakonexport) >>".to_string(),
+    ];
+    for i in 0..np {
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
+              /Resources << /Font << /F1 3 0 R >> /Contents {} 0 R >>",
+            fnum(PAGE_W),
+            fnum(PAGE_H),
+            7 + np + i
+        ));
+    }
+    for s in &streams {
+        objects.push(format!("<< /Length {} >>", s.len()));
+    }
+    if with_outline {
+        let last = entry_first + ndoc - 1;
+        objects.push(format!(
+            "<< /Type /Outlines /First {entry_first} 0 R /Last {last} 0 R /Count {ndoc} >>"
+        ));
+        for (i, d) in docs.iter().enumerate() {
+            // the page OBJECT number: pages are objects 7..(6+np), so the
+            // k-th page (1-based) is object 6 + k
+            let page_obj = starts[i].min(np) + 6;
+            let t: String = d.title.chars().take(60).collect();
+            objects.push(format!(
+                "<< /Title <{}> /Parent {outlines_root} 0 R /Dest [{page_obj} 0 R /XYZ 0 {} 0] >>",
+                title_hex(&t),
+                fnum(PAGE_H)
+            ));
+        }
+    }
+
+    // ---- write -----------------------------------------------------------
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(b"%PDF-1.4\n%\xC2\xEB\xE6\xBF\xBD\n");
+    let mut offsets: Vec<u32> = Vec::new();
+    for (i, obj) in objects.iter().enumerate() {
+        offsets.push(out.len() as u32);
+        out.extend_from_slice(&format!("{} 0 obj\n", i + 1).into_bytes());
+        if i == 4 {
+            out.extend_from_slice(
+                &format!(
+                    "<< /Length {} /Filter /FlateDecode >>\nstream\n",
+                    font_file.len()
+                )
+                .into_bytes(),
+            );
+            out.extend_from_slice(&font_file);
+            out.extend_from_slice(b"\nendstream\n");
+        } else if i + 1 >= 7 + np && i + 1 < 7 + 2 * np {
+            let idx = i + 1 - (7 + np);
+            out.extend_from_slice(obj.as_bytes());
+            out.extend_from_slice(b"\nstream\n");
+            out.extend_from_slice(&streams[idx]);
+            out.extend_from_slice(b"\nendstream\n");
+        } else {
+            out.extend_from_slice(obj.as_bytes());
+        }
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref_at = out.len() as u32;
+    let n_obj = objects.len() + 1;
+    out.extend_from_slice(&format!("xref\n0 {n_obj}\n").into_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for off in &offsets {
+        out.extend_from_slice(&format!("{off:010} 00000 n \n").into_bytes());
+    }
+    out.extend_from_slice(
+        &format!(
+            "trailer\n<< /Size {n_obj} /Root 1 0 R /Info 6 0 R >>\nstartxref\n{xref_at}\n%%EOF\n"
+        )
+        .into_bytes(),
+    );
+    std::fs::write(path, out)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1181,6 +1530,124 @@ mod tests {
         assert!(s.contains("/Type /Page"), "page obj");
         assert!(s.contains("startxref"), "xref");
         assert!(s.contains("%%EOF"), "eof");
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// How many of `codes` a candidate font file actually maps to real glyphs.
+    fn coverage_of(name: &str, codes: &std::collections::HashSet<u32>) -> Option<u64> {
+        let raw = std::fs::read(font_file(name)).ok()?;
+        let f = parse(&raw).ok()?;
+        Some(codes.iter().filter(|cp| f.cmap.lookup(**cp) != 0).count() as u64)
+    }
+
+    #[test]
+    fn select_font_covers_required_code_points() {
+        if !default_font_path().exists() {
+            eprintln!("skip: C:\\Windows\\Fonts\\arial.ttf missing");
+            return;
+        }
+        let codes: std::collections::HashSet<u32> =
+            "ЗАКОН і ж 0 • – -".chars().map(|c| c as u32).collect();
+        let p = select_font(&codes);
+        let raw = std::fs::read(&p).expect("read the chosen font");
+        let f = parse(&raw).expect("parse the chosen font");
+        let chosen_cov = codes.iter().filter(|cp| f.cmap.lookup(**cp) != 0).count() as u64;
+        // the picker must reach the best coverage ANY candidate can offer
+        let max_cov = FONT_CANDIDATES
+            .iter()
+            .filter_map(|n| coverage_of(n, &codes))
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            chosen_cov, max_cov,
+            "chosen {} covers {chosen_cov}/{}, best possible {max_cov}",
+            p.display(),
+            codes.len()
+        );
+        // the stale-arial case: when arial lacks a code point but some other
+        // candidate covers everything, the picker must not return arial
+        if let Some(a) = coverage_of("arial.ttf", &codes) {
+            if a < codes.len() as u64 && max_cov == codes.len() as u64 {
+                assert!(p != default_font_path(), "arial chosen despite incomplete coverage");
+            }
+        }
+    }
+
+    #[test]
+    fn select_font_empty_codes_prefers_default() {
+        if !default_font_path().exists() {
+            eprintln!("skip: no fonts");
+            return;
+        }
+        let codes: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        // no requirement: the first parseable candidate (arial) wins
+        assert_eq!(select_font(&codes), default_font_path());
+    }
+
+    #[test]
+    fn pdf_bundle_structure() {
+        if !default_font_path().exists() {
+            eprintln!("skip: no fonts");
+            return;
+        }
+        let heads1: Vec<String> =
+            vec!["файл: 1.mb".to_string(), "дата: 01.01.2026".to_string()];
+        let heads2: Vec<String> = vec!["файл: 2.mb".to_string()];
+        let text1 = "Затверджено\n\nПОСТАНОВА\n\nПро ліміт зобов'язань\n\n1. Затвердити ліміт.\n2. Контроль за виконанням.";
+        let text2 = "ВИСНОВКИ\n\nАудит виявив порушення.\n• Порушення 1.\n• Порушення 2.";
+        let docs = [
+            PdfDoc {
+                title: "Постанова № 175-П",
+                head_lines: &heads1,
+                text: text1,
+            },
+            PdfDoc {
+                title: "Висновки про аудит",
+                head_lines: &heads2,
+                text: text2,
+            },
+        ];
+        let out = tmp(r"C:\temp\opencode\pdf_bundle_test.pdf");
+        write_pdf_bundle(&out, &docs).unwrap();
+        let b = std::fs::read(&out).unwrap();
+        let s = String::from_utf8_lossy(&b).to_string();
+        assert!(s.starts_with("%PDF-1.4"), "PDF header");
+        assert!(s.contains("/Outlines"), "outline root");
+        assert!(s.contains("/Count 2"), "outline item count");
+        // two outline entries, each with its own /Dest
+        assert_eq!(s.matches("/Dest [").count(), 2, "two outline entries");
+        // every document opens a fresh page: at least 2 page objects
+        let pages = s.matches("/Type /Page ").count();
+        assert!(pages >= 2, "fresh page per document (pages={pages})");
+        // the first /Dest must reference a PAGE OBJECT number (7..), not a
+        // 1-based page index: the pages are objects 7..(6+np)
+        let m = s.find("/Dest [").unwrap();
+        let num: u32 = s[m + 7..]
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            (7..(7 + pages as u32)).contains(&num),
+            "outline dest object {num} outside page objects 7..{}",
+            7 + pages
+        );
+        // byte-exact xref (the FLATE font stream is not valid UTF-8, so the
+        // lossy string above may shift indices — check against the raw bytes)
+        let at = s.rfind("startxref").unwrap();
+        let off: usize = s[at + 9..]
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            b.get(off..off + 4),
+            Some(b"xref".as_slice()),
+            "xref offset must point at the xref keyword"
+        );
         let _ = std::fs::remove_file(&out);
     }
 }

@@ -489,6 +489,12 @@ pub struct App {
         text: "додатки (сигнальні документи)")]
     chk_attach: nwg::CheckBox,
 
+    // "зв'язка (1 файл)": all exported documents go into ONE file
+    // (md/rtf/docx/html/pdf; pdf gets a /Outlines table of contents)
+    #[nwg_control(parent: window, size: (280, 24), position: (712, 724),
+        text: "зв'язка (1 файл на всі документи)")]
+    chk_bundle: nwg::CheckBox,
+
     #[nwg_control(parent: window, text: "Готово")]
     status: nwg::StatusBar,
 
@@ -1040,7 +1046,8 @@ impl App {
             naming.out_dir = dir;
         }
         let attach = self.chk_attach.check_state() == nwg::CheckBoxState::Checked;
-        thread::spawn(move || export_worker(tx, baza, hits, format, naming, gen, attach));
+        let single = self.chk_bundle.check_state() == nwg::CheckBoxState::Checked;
+        thread::spawn(move || export_worker(tx, baza, hits, format, naming, gen, attach, single));
     }
 
     fn bases_current(&self) -> (String, PathBuf) {
@@ -1925,6 +1932,9 @@ impl App {
                             }
                         }
                         2 => {
+                            // "зв'язка" mode: all exported documents go into
+                            // ONE file (bundle-2-<first>.<fmt> in the run dir)
+                            self.chk_bundle.set_check_state(nwg::CheckBoxState::Checked);
                             self.on_export_selected();
                             *self.gt_stage.borrow_mut() = 3;
                         }
@@ -1948,10 +1958,15 @@ impl App {
                                 let total = self.results.borrow().0.len();
                                 let chars = self.preview_text.len() as usize;
                                 let title = self.preview_window.text();
+                                // files written into the export run dir (a
+                                // "зв'язка" bundle = 1 file for N documents)
+                                let files = std::fs::read_dir(&out)
+                                    .map(|rd| rd.filter_map(|e| e.ok()).count())
+                                    .unwrap_or(0);
                                 let _ = std::fs::write(
                                     GUI_READY,
                                     format!(
-                                        "GUI OK rows={rows} selected={sel} exported={exported} total={total} out={out} preview_chars={chars} ptitle={title}\n"
+                                        "GUI OK rows={rows} selected={sel} exported={exported} files={files} total={total} out={out} preview_chars={chars} ptitle={title}\n"
                                     ),
                                 );
                                 *self.gt_stage.borrow_mut() = 5;
@@ -2047,11 +2062,12 @@ fn export_worker(
     naming: Naming,
     gen: usize,
     attach: bool,
+    single: bool,
 ) {
     let progress = |done: usize, t: usize| {
         let _ = tx.send(GuiMsg::ExportProgress { gen, done, total: t });
     };
-    match writers::export_hits(&baza, &hits, &format, &naming, Some(&progress), attach) {
+    match writers::export_hits(&baza, &hits, &format, &naming, Some(&progress), attach, single) {
         Ok((exported, attached, out)) => {
             let _ = tx.send(GuiMsg::ExportDone {
                 gen,

@@ -21,6 +21,7 @@ pub fn export_hits(
     naming: &crate::naming::Naming,
     progress: Option<&dyn Fn(usize, usize)>,
     attach: bool,
+    single: bool,
 ) -> anyhow::Result<(usize, usize, std::path::PathBuf)> {
     let out = Path::new(&naming.out_dir);
     let dir = naming.prepare_out(out)?;
@@ -35,9 +36,54 @@ pub fn export_hits(
         }
         return Ok((n, 0, dir));
     }
+    let total = hits.len();
+    // "зв'язка" (bundle): ALL the documents into ONE file (csv is already a
+    // single results table and ignores `single`)
+    if single {
+        let mut docs: Vec<BundleDoc> = Vec::with_capacity(total);
+        let mut attached = 0usize;
+        for h in hits.iter() {
+            let text = match base.doc_text(baza, h.docnum) {
+                Ok(t) => t,
+                Err(e) => format!("[помилка рендера документа {}: {e}]", h.docnum),
+            };
+            let f = crate::fields::parse(h.docnum, &text);
+            let title = f
+                .title
+                .clone()
+                .unwrap_or_else(|| first_line(&text, 60));
+            let head = head_from(&f, &h.file, &title, None);
+            if attach {
+                // a unique per-doc attachment name inside one bundle folder
+                let stem = format!("doc_{}", h.docnum);
+                if crate::signal::copy_signal(baza, h.docnum, &dir, &stem)?.is_some() {
+                    attached += 1;
+                }
+            }
+            docs.push(BundleDoc {
+                head,
+                text,
+                docnum: h.docnum,
+            });
+            if let Some(p) = progress {
+                p(docs.len(), total);
+            }
+        }
+        let first_docnum = hits.first().map(|h| h.docnum).unwrap_or(0);
+        let bname = naming.sanitize(&format!("bundle-{total}-{first_docnum}.{format}"));
+        let fpath = naming.dedupe(&dir.join(&bname));
+        match format {
+            "md" => write_markdown_bundle(&fpath, &docs)?,
+            "rtf" => write_rtf_bundle(&fpath, &docs)?,
+            "docx" => write_docx_bundle(&fpath, &docs)?,
+            "html" => write_html_bundle(&fpath, &docs)?,
+            "pdf" => write_pdf_bundle(&fpath, &docs)?,
+            other => anyhow::bail!("unknown format: {other}"),
+        }
+        return Ok((total, attached, dir));
+    }
     let mut exported = 0usize;
     let mut attached = 0usize;
-    let total = hits.len();
     for (idx, h) in hits.iter().enumerate() {
         let text = match base.doc_text(baza, h.docnum) {
             Ok(t) => t,
@@ -279,29 +325,7 @@ pub fn write_rtf(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<(
     }
     // body: one RTF paragraph per document line, attributes grouped so they
     // never leak into the next paragraph
-    for line in text.lines() {
-        let (lead, t, caps, bullet) = line_traits(line);
-        if t.is_empty() {
-            rtf.push_str("\\par\n");
-            continue;
-        }
-        rtf.push('{');
-        if bullet {
-            rtf.push_str("\\li720\\bullet\\tab ");
-        } else if is_centered(lead, t, caps) {
-            rtf.push_str("\\qc ");
-        }
-        if caps {
-            rtf.push_str("\\b ");
-            rtf_run(&mut rtf, t);
-            rtf.push_str("\\b0 ");
-        } else if bullet {
-            rtf_run(&mut rtf, bullet_body(t));
-        } else {
-            rtf_run(&mut rtf, t);
-        }
-        rtf.push_str("\\par\n}");
-    }
+    rtf_body(&mut rtf, text);
     rtf.push('}');
     std::fs::write(path, rtf)?;
     Ok(())
@@ -335,22 +359,23 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-pub fn write_docx(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
-    // bold title paragraph + italic requisites lines
-    let mut paras = String::new();
-    if let Some(h) = head {
+/// The document's header paragraphs (bold title + italic requisites lines).
+fn docx_head_paras(head: &ExportHead, paras: &mut String) {
+    paras.push_str(&format!(
+        "<w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",
+        xml_escape(&head.title)
+    ));
+    for line in &head.lines {
         paras.push_str(&format!(
-            "<w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",
-            xml_escape(&h.title)
+            "<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",
+            xml_escape(line)
         ));
-        for line in &h.lines {
-            paras.push_str(&format!(
-                "<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",
-                xml_escape(line)
-            ));
-        }
-        paras.push_str("<w:p/>");
     }
+    paras.push_str("<w:p/>");
+}
+
+/// The document's body paragraphs (list indent or centering, bold ALL-CAPS).
+fn docx_body_paras(text: &str, paras: &mut String) {
     for line in text.split('\n') {
         let (lead, t, caps, bullet) = line_traits(line);
         if t.is_empty() {
@@ -382,11 +407,11 @@ pub fn write_docx(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<
             "<w:p>{ppr_block}<w:r><w:t xml:space=\"preserve\">{content}</w:t></w:r></w:p>"
         ));
     }
-    let doc = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
-<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
-<w:body>{paras}</w:body></w:document>"
-    );
+}
+
+/// Package a finished `word/document.xml` as the minimal stored-entries docx
+/// zip (the fixed [Content_Types].xml + .rels wrappers).
+fn docx_write_zip(path: &Path, doc: &str) -> Result<()> {
     let types = concat!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
         "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
@@ -406,8 +431,52 @@ pub fn write_docx(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<
         ("_rels/.rels", root_rels.as_bytes()),
         ("word/document.xml", doc.as_bytes()),
     ];
-    write_stored_zip(path, &entries)?;
-    Ok(())
+    write_stored_zip(path, &entries)
+}
+
+pub fn write_docx(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
+    let mut paras = String::new();
+    if let Some(h) = head {
+        docx_head_paras(h, &mut paras);
+    }
+    docx_body_paras(text, &mut paras);
+    let doc = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+<w:body>{paras}</w:body></w:document>"
+    );
+    docx_write_zip(path, &doc)
+}
+
+/// DOCX bundle: a bold "Зв'язка" header with the numbered document list,
+/// then EVERY document (its title + requisites + body) on its own page
+/// (`w:br w:type="page"` breaks).
+pub fn write_docx_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+    let n = docs.len();
+    let mut paras = String::new();
+    paras.push_str(&format!(
+        "<w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t xml:space=\"preserve\">Зв'язка — {n} документ(ів)</w:t></w:r></w:p>"
+    ));
+    for (i, d) in docs.iter().enumerate() {
+        paras.push_str(&format!(
+            "<w:p><w:r><w:t xml:space=\"preserve\">{}. {} (№ {})</w:t></w:r></w:p>",
+            i + 1,
+            xml_escape(&d.head.title),
+            d.docnum
+        ));
+    }
+    const PAGE_BREAK: &str = "<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>";
+    for d in docs.iter() {
+        paras.push_str(PAGE_BREAK);
+        docx_head_paras(&d.head, &mut paras);
+        docx_body_paras(&d.text, &mut paras);
+    }
+    let doc = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+<w:body>{paras}</w:body></w:document>"
+    );
+    docx_write_zip(path, &doc)
 }
 
 // ---- HTML (format-preserving; the browser's print-to-PDF path) ------------
@@ -426,16 +495,10 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// HTML view of one document: the same layout rules as doc_markdown —
-/// centered lines are centered, ALL-CAPS lines are bold, dash items become
-/// <ul><li>, numbered items stay as-is. Opens in any browser; Ctrl+P gives
-/// a PDF (the browser's print-to-PDF), so this is also the print path.
-pub fn write_html(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
-    let mut body = String::new();
-    let title = match head {
-        Some(h) => h.title.clone(),
-        None => first_line(text, 60).to_string(),
-    };
+/// One document's HTML body: `<h1>` title + meta paragraph + the body
+/// layout (the same rules as doc_markdown: centered paragraphs, bold
+/// ALL-CAPS, `<ul><li>` lists).
+fn html_doc_body(head: Option<&ExportHead>, text: &str, body: &mut String) {
     if let Some(h) = head {
         body.push_str(&format!("<h1>{}</h1>\n", html_escape(&h.title)));
         body.push_str("<p class=\"meta\">");
@@ -484,12 +547,63 @@ pub fn write_html(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<
     if in_list {
         body.push_str("</ul>\n");
     }
+}
+
+/// HTML view of one document: the same layout rules as doc_markdown —
+/// centered lines are centered, ALL-CAPS lines are bold, dash items become
+/// <ul><li>, numbered items stay as-is. Opens in any browser; Ctrl+P gives
+/// a PDF (the browser's print-to-PDF), so this is also the print path.
+pub fn write_html(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
+    let mut body = String::new();
+    let title = match head {
+        Some(h) => h.title.clone(),
+        None => first_line(text, 60).to_string(),
+    };
+    html_doc_body(head, text, &mut body);
     let html = format!(
         "<!DOCTYPE html>\n<html lang=\"uk\"><head><meta charset=\"utf-8\">\n<title>{}</title>\n\
          <style>{}</style></head>\n<body>\n{}\n</body></html>\n",
         html_escape(&title),
         HTML_STYLE,
         body
+    );
+    std::fs::write(path, html)?;
+    Ok(())
+}
+
+/// HTML bundle: a "Зв'язка" header with a clickable Зміст (anchors to each
+/// document's section), then every document inside its own `<section>`
+/// (CSS page-break-before:always for the browser's print-to-PDF).
+pub fn write_html_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+    let n = docs.len();
+    let mut body = String::new();
+    body.push_str(&format!("<h1>Зв'язка — {n} документ(ів)</h1>\n"));
+    if n > 1 {
+        body.push_str("<ol class=\"toc\">\n");
+        for (i, d) in docs.iter().enumerate() {
+            body.push_str(&format!(
+                "<li><a href=\"#doc{}\">{} (№ {})</a></li>\n",
+                i + 1,
+                html_escape(&d.head.title),
+                d.docnum
+            ));
+        }
+        body.push_str("</ol>\n");
+    }
+    for (i, d) in docs.iter().enumerate() {
+        body.push_str(&format!("<section id=\"doc{}\" class=\"doc\">\n", i + 1));
+        html_doc_body(Some(&d.head), &d.text, &mut body);
+        body.push_str("</section>\n");
+    }
+    let style = format!(
+        "{HTML_STYLE} \
+ol.toc{{max-width:640px}} \
+section.doc{{page-break-before:always}} \
+section.doc h1{{margin-top:0}}"
+    );
+    let html = format!(
+        "<!DOCTYPE html>\n<html lang=\"uk\"><head><meta charset=\"utf-8\">\n<title>Зв'язка ({n})</title>\n\
+         <style>{style}</style></head>\n<body>\n{body}\n</body></html>\n"
     );
     std::fs::write(path, html)?;
     Ok(())
@@ -515,6 +629,125 @@ pub fn write_pdf(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<(
     lines.extend(text.lines().map(|l| l.to_string()));
     let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
     crate::pdf::write_pdf(&path, &title, &refs)?;
+    Ok(())
+}
+
+/// PDF bundle: EVERY document in ONE PDF (fresh page per document) with a
+/// /Outlines table of contents (clickable PDF bookmarks). The embedded font
+/// subset is auto-picked (pdf::select_font) over the union of all docs'
+/// characters — a Cyrillic-capable system font when the local arial.ttf is
+/// "stale".
+pub fn write_pdf_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+    let pdf_docs: Vec<crate::pdf::PdfDoc> = docs
+        .iter()
+        .map(|d| crate::pdf::PdfDoc {
+            title: &d.head.title,
+            head_lines: &d.head.lines,
+            text: &d.text,
+        })
+        .collect();
+    crate::pdf::write_pdf_bundle(path, &pdf_docs)
+}
+
+// ============================================================
+// "зв'язка" (bundle) writers: ONE file for many documents
+// ============================================================
+
+/// One document of a multi-document bundle (requisites head + rendered text
+/// + the source docnum for the table of contents).
+pub struct BundleDoc {
+    pub head: ExportHead,
+    pub text: String,
+    pub docnum: u32,
+}
+
+/// Markdown bundle: a "Зв'язка" header with a Зміст (table of contents),
+/// then each document (its own # title + requisites + body), separated by
+/// `---` rules.
+pub fn write_markdown_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+    let n = docs.len();
+    let mut s = String::new();
+    s.push_str(&format!("# Зв'язка — {n} документ(ів)\n\n"));
+    if n > 1 {
+        s.push_str("**Зміст**\n\n");
+        for (i, d) in docs.iter().enumerate() {
+            s.push_str(&format!(
+                "{}. {} (№ {})\n",
+                i + 1,
+                d.head.title,
+                d.docnum
+            ));
+        }
+        s.push_str("\n---\n\n");
+    }
+    for (i, d) in docs.iter().enumerate() {
+        s.push_str(&doc_markdown_head(&d.head.title, &d.head.lines, &d.text));
+        if i + 1 < n {
+            s.push_str("\n---\n\n");
+        }
+    }
+    std::fs::write(path, s)?;
+    Ok(())
+}
+
+/// The rtf body of a document (the same per-line rules as write_rtf:
+/// centered \qc, ALL-CAPS bold, \bullet lists), one RTF paragraph per line.
+fn rtf_body(rtf: &mut String, text: &str) {
+    for line in text.lines() {
+        let (lead, t, caps, bullet) = line_traits(line);
+        if t.is_empty() {
+            rtf.push_str("\\par\n");
+            continue;
+        }
+        rtf.push('{');
+        if bullet {
+            rtf.push_str("\\li720\\bullet\\tab ");
+        } else if is_centered(lead, t, caps) {
+            rtf.push_str("\\qc ");
+        }
+        if caps {
+            rtf.push_str("\\b ");
+            rtf_run(rtf, t);
+            rtf.push_str("\\b0 ");
+        } else if bullet {
+            rtf_run(rtf, bullet_body(t));
+        } else {
+            rtf_run(rtf, t);
+        }
+        rtf.push_str("\\par\n}");
+    }
+}
+
+/// RTF bundle: a bold "Зв'язка" header + numbered Зміст, then each document
+/// (bold title + italic requisites + body) on its own page (\page breaks).
+pub fn write_rtf_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+    let mut rtf = String::from(
+        "{\\rtf1\\ansi\\ansicpg1251\\deff0{\\fonttbl{\\f0\\fnil\\fcharset0 Times New Roman;}}\n",
+    );
+    let n = docs.len();
+    rtf_line(&mut rtf, &format!("Зв'язка — {n} документ(ів)"), true, false);
+    for (i, d) in docs.iter().enumerate() {
+        rtf_line(
+            &mut rtf,
+            &format!("{}. {} (№ {})", i + 1, d.head.title, d.docnum),
+            false,
+            false,
+        );
+    }
+    rtf.push_str("\\par\n");
+    for (i, d) in docs.iter().enumerate() {
+        if i > 0 {
+            rtf.push_str("\\par\\page\\par\n"); // fresh page per document
+        }
+        rtf_line(&mut rtf, &d.head.title, true, false);
+        for line in &d.head.lines {
+            rtf_line(&mut rtf, line, false, true);
+        }
+        rtf.push_str("\\par\n");
+        rtf_body(&mut rtf, &d.text);
+    }
+    rtf.push('}');
+    std::fs::write(path, rtf)?;
     Ok(())
 }
 
@@ -821,6 +1054,128 @@ mod tests {
         // the xref offset must point at the "xref" keyword. Check against
         // the raw bytes (the lossy string above shifts indices: the FLATE
         // font stream is not valid UTF-8)
+        let at = s.rfind("startxref").unwrap();
+        let off: usize = s[at + 9..]
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            b.get(off..off + 4),
+            Some(b"xref".as_slice()),
+            "xref offset points at the xref table"
+        );
+        let _ = std::fs::remove_file(p);
+    }
+
+    fn bundle_docs() -> Vec<BundleDoc> {
+        let d1 = BundleDoc {
+            head: head(),
+            text: "     КАБІНЕТ МІНІСТРІВ УКРАЇНИ\n\n• item one\n1. numbered first".into(),
+            docnum: 222,
+        };
+        let d2 = BundleDoc {
+            head: ExportHead {
+                title: "ПРОЕКТ ЗАКОНУ".into(),
+                lines: vec!["файл: 9275.mb".into(), "номер: № 481".into()],
+            },
+            text: "     ВЕРХОВНА РАДА\n\n– item two\n• item three".into(),
+            docnum: 9275,
+        };
+        vec![d1, d2]
+    }
+
+    #[test]
+    fn bundle_markdown_structure() {
+        let docs = bundle_docs();
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.md");
+        write_markdown_bundle(p, &docs).unwrap();
+        let s = std::fs::read_to_string(p).unwrap();
+        // bundle header + a Зміст that lists BOTH documents (title + docnum)
+        assert!(s.contains("# Зв'язка — 2 документ(ів)"), "{s}");
+        assert!(s.contains("**Зміст**"), "{s}");
+        assert!(s.contains("1. КАБІНЕТ МІНІСТРІВ ПРО... (№ 222)"), "{s}");
+        assert!(s.contains("2. ПРОЕКТ ЗАКОНУ (№ 9275)"), "{s}");
+        // both documents' own headers + bodies are present, with separators
+        assert!(s.contains("# КАБІНЕТ МІНІСТРІВ ПРО..."), "{s}");
+        assert!(s.contains("# ПРОЕКТ ЗАКОНУ"), "{s}");
+        assert!(s.contains("numbered first"), "{s}");
+        assert!(s.contains("item three"), "{s}");
+        assert_eq!(s.matches("\n---\n").count(), 2, "TOC + doc separators");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn bundle_rtf_structure() {
+        let docs = bundle_docs();
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.rtf");
+        write_rtf_bundle(p, &docs).unwrap();
+        let s = std::fs::read_to_string(p).unwrap();
+        assert!(s.starts_with("{\\rtf1"), "{s}");
+        assert!(s.contains("\\page"), "page break between documents");
+        // both documents' Cyrillic reached cp1251 escapes (А='Е0', В='B2')
+        assert!(s.contains("\\'E0") || s.contains("\\'e0"), "Cyrillic А escaped");
+        assert!(s.contains("222"), "docnum 222 in the TOC line");
+        assert!(s.contains("9275"), "docnum 9275 in the TOC line");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn bundle_docx_structure() {
+        let docs = bundle_docs();
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.docx");
+        write_docx_bundle(p, &docs).unwrap();
+        // the zip's word/document.xml must carry BOTH documents + page breaks
+        let b = std::fs::read(p).unwrap();
+        assert_eq!(&b[0..2], b"PK", "zip magic");
+        let s = String::from_utf8_lossy(&b).to_string();
+        assert!(s.contains("w:br w:type=\"page\""), "{s}");
+        // 2 docs → 2 page breaks (one before each document)
+        assert_eq!(s.matches("w:br w:type=\"page\"").count(), 2, "one break per doc");
+        assert!(s.contains("КАБІНЕТ МІНІСТРІВ"), "{s}");
+        assert!(s.contains("ВЕРХОВНА РАДА"), "{s}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn bundle_html_structure() {
+        let docs = bundle_docs();
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.html");
+        write_html_bundle(p, &docs).unwrap();
+        let s = std::fs::read_to_string(p).unwrap();
+        assert!(s.contains("<h1>Зв'язка — 2 документ(ів)</h1>"), "{s}");
+        // the clickable Зміст anchors BOTH document sections
+        assert!(s.contains("href=\"#doc1\""), "{s}");
+        assert!(s.contains("href=\"#doc2\""), "{s}");
+        assert!(s.contains("<section id=\"doc1\" class=\"doc\">"), "{s}");
+        assert!(s.contains("<section id=\"doc2\" class=\"doc\">"), "{s}");
+        assert!(s.contains("page-break-before:always"), "{s}");
+        // both documents' bodies
+        assert!(s.contains("numbered first"), "{s}");
+        assert!(s.contains("item three"), "{s}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn bundle_pdf_structure() {
+        // the PDF bundle embeds a system font subset — skip when absent
+        if !crate::pdf::default_font_path().exists() {
+            return;
+        }
+        let docs = bundle_docs();
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.pdf");
+        write_pdf_bundle(p, &docs).unwrap();
+        let b = std::fs::read(p).unwrap();
+        let s = String::from_utf8_lossy(&b).to_string();
+        assert!(s.starts_with("%PDF-1.4"), "PDF header");
+        assert!(s.contains("/Outlines"), "outline root");
+        assert!(s.contains("/Count 2"), "outline item count");
+        assert_eq!(s.matches("/Dest [").count(), 2, "two outline entries");
+        // each document starts on a fresh page: at least 2 page objects
+        assert!(s.matches("/Type /Page ").count() >= 2, "fresh page per doc");
+        // the xref offset must point at the "xref" keyword (raw bytes)
         let at = s.rfind("startxref").unwrap();
         let off: usize = s[at + 9..]
             .lines()

@@ -26,8 +26,15 @@
   центрированные строки): `md`, `rtf`, `docx` (valid zip + CRC-32), `html`,
   `csv` (таблица результатов одним файлом) и **`pdf`** — чистый Rust-райтер:
   PDF 1.4 со встраиваемым **сабсетом системного шрифта**
-  `C:\Windows\Fonts\arial.ttf` (cmap/glyf/hmtx/loca/post, FLATE-поток,
-  /Differences + /Widths). Никакого внешнего PDF-генератора.
+  (авто-выбор: arial → times → cambria → georgia → tahoma → verdana;
+  cmap/glyf/hmtx/loca/post, FLATE-поток, /Differences + /Widths).
+  Никакого внешнего PDF-генератора.
+- **Зв'язка (bundle): все документы в ОДИН файл** — `--single` (алиас
+  `--zvizka`) для `export`/`bulk` + чекбокс «зв'язка (1 файл)» в GUI:
+  md/rtf/docx/html/pdf одним файлом `bundle-<N>-<docnum>.<ext>`: шапка
+  «Зв'язка — N документов», нумерованное Зміст (название + № каждого
+  документа), каждый документ с новой страницы; у PDF — `/Outlines`
+  (закладки/содержимое PDF, кликабельные Dest на стартовую страницу).
 - **GDI-друк** (без Word и других приложений): системный диалог печати
   (`PrintDlg`), GDI-цикл страниц, отмена → статус «відмінено», не ошибка.
   CLI: `print <docnum>`; в GUI — кнопка «Друк» в окне предпросмотра.
@@ -61,7 +68,7 @@ cargo build --release
 Тесты:
 
 ```
-cargo test --lib       # юнит-тесты движка, writers, pdf (51 тест)
+cargo test --lib       # юнит-тесты движка, writers, pdf (59 тестов)
 zakonexport-gui.exe --guitest --baza C:\Zakon.Local\Baza.GK   # GUI-самотест
 ```
 
@@ -70,7 +77,7 @@ zakonexport-gui.exe --guitest --baza C:\Zakon.Local\Baza.GK   # GUI-самоте
 ```
 zakonexport-cli search <query> [--and|--or|--phrase] [--number] [--max n] [--fields]
 zakonexport-cli export <query> [фильтры] [--format md|rtf|docx|html|csv|pdf] [--out dir]
-                       [--docs n1,n2-n5 | --pick] [--attach]
+                       [--docs n1,n2-n5 | --pick] [--attach] [--single]
 zakonexport-cli export --docs 136974,222-225 [--format pdf] [--out dir]
 zakonexport-cli fields <docnum>      # реквизиты документа
 zakonexport-cli extract <docnum>     # полный текст документа
@@ -111,12 +118,15 @@ build\run-gui.bat  запуск GUI двойным кликом
 
 ## Известные особенности
 
-- **Шрифт PDF**: встраиваемый сабсет `arial.ttf` берётся из системы. На части
-  машин системный `arial.ttf` имеет «усталый» cmap: часть кириллических кодов
-  указывает за пределы собственной glyph-таблицы шрифта. Райтер закрывает
-  такие маппинги в `.notdef` (gid → 0), т.е. символы, которых у шрифта
-  объективно нет, рисуются как пустые глифы. Для машин с обычным Arial
-  (full Cyrillic) это ограничение не проявляется.
+- **Шрифт PDF**: встраиваемый сабсет берётся из системы с **авто-выбором**
+  (`pdf::select_font`): кандидаты arial → times → cambria → georgia →
+  tahoma → verdana; выбирается первый шрифт с 100% покрытием использованных
+  кодов (иначе — лучшее покрытие, иначе arial.ttf). На части машин
+  системный `arial.ttf` имеет «усталый» cmap: часть кириллических кодов
+  указывает за пределы собственной glyph-таблицы шрифта; такие маппинги
+  считаются непокрытыми (gid за пределами таблицы → `.notdef`), и селектор
+  переходит на лучшего кандидата, если тот покрывает больше. На машинах с
+  обычным Arial (full Cyrillic) выбирается arial с полным покрытием.
 - База читается **только для чтения**; каталог по умолчанию
   `C:\temp\opencode\export`.
 
@@ -128,6 +138,13 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.11.0** — «зв'язка» (все документы в один файл: `--single` / чекбокс
+  «зв'язка (1 файл)»; md/rtf/docx/html/pdf, у PDF — `/Outlines` зміст +
+  новий документ з нової сторінки), авто-вибір PDF-шрифту (кириличний
+  fallback arial→times/cambria/…), 59 юніт-тестів. / “Зв'язка” bundle:
+  all documents into ONE file (`--single` / GUI checkbox; md/rtf/docx/
+  html/pdf, PDF gets a `/Outlines` TOC + fresh page per document),
+  automatic PDF font selection (Cyrillic fallback), 59 unit tests.
 - **v0.10.0** — GDI-друк (системний діалог, `print <docnum>`, кнопка «Друк»),
   PDF-експорт (чистий Rust, Arial-сабсет), 51 юніт-тест. / GDI printing
   (system dialog), pure-Rust PDF export (Arial subset), 51 unit tests.

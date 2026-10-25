@@ -22,9 +22,11 @@ on:
 jobs:
   assets:
     runs-on: ubuntu-latest
-    # contents: write is enough for POST /releases/{id}/assets
+    # contents: write is enough for POST /releases/{id}/assets;
+    # releases: write covers it if the runner knows that scope
     permissions:
       contents: write
+      releases: write
     steps:
       - uses: actions/checkout@v4
 
@@ -44,8 +46,10 @@ jobs:
           [ ${#files[@]} -gt 0 ] || { echo "no files in releases/$TAG"; exit 1; }
           for f in "${files[@]}"; do
             echo "uploading $f"
-            curl -sf "${AUTH[@]}" -H "Content-Type: application/octet-stream" \
-              --data-binary "@$f" \
-              "$BASE/releases/$REL_ID/assets?name=$(basename "$f")" > /dev/null
+            code=$(curl -s "${AUTH[@]}" -H "Content-Type: application/octet-stream" \
+              -w '%{http_code}' --data-binary "@$f" -o /tmp/resp.json \
+              "$BASE/releases/$REL_ID/assets?name=$(basename "$f")")
+            echo "HTTP $code: $(head -c 300 /tmp/resp.json)"
+            [ "$code" = "201" ] || exit 1
           done
           echo "done"

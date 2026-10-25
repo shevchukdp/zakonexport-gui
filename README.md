@@ -142,8 +142,8 @@ release pages carry the same notes (UK + EN).
   no archived binaries.
 
 Процес релізу / Release process: `CHANGELOG.md` (UA+EN) → тег + сторінка
-релізу (UA+EN) → `releases/<v>/` в репо + ассети
-(`.github/workflows/release-assets.yml`; завантаження йде через
-`uploads.github.com`). / `CHANGELOG.md` (UA+EN) → tag + release page
-(UA+EN) → `releases/<v>/` in-repo + assets (uploads go through
-`uploads.github.com`).
+релізу (UA+EN) → `releases/<v>/` в репо (**changes.md** UA+EN + бинарники)
++ ассети GitHub-релізу (`.github/workflows/release-assets.yml`;
+завантаження йде через `uploads.github.com`). / `CHANGELOG.md` (UA+EN) →
+tag + release page (UK+EN) → `releases/<v>/` in-repo (**changes.md**
+UK+EN + binaries) + release assets (uploads go through `uploads.github.com`).

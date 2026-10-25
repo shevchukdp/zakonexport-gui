@@ -3,13 +3,15 @@
 Правило для кожної нової версії (standing rule, UA + EN):
 1. Запис у цьому файлі (UA + EN) — до публікації;
 2. Нотатки сторінки GitHub-релізу — UA + EN;
-3. Бинарники: `releases/<v>/` у репо + ассети GitHub-релізу
+3. Файл `changes.md` (UA + EN) **в папці версії** `releases/<v>/`;
+4. Бинарники: `releases/<v>/` у репо + ассети GitHub-релізу
    (`.github/workflows/release-assets.yml` або прямий POST на `uploads.github.com`).
 
 Rule for every new version (UA + EN):
 1. An entry in this file (UA + EN) — before publishing;
-2. GitHub release notes — UA + EN;
-3. Binaries: `releases/<v>/` in-repo + GitHub release assets
+2. GitHub release notes — UK + EN;
+3. A `changes.md` file (UK + EN) **inside the version folder** `releases/<v>/`;
+4. Binaries: `releases/<v>/` in-repo + GitHub release assets
    (`.github/workflows/release-assets.yml` or direct POST to `uploads.github.com`).
 
 ---

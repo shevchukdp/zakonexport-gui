@@ -22,11 +22,11 @@ on:
 jobs:
   assets:
     runs-on: ubuntu-latest
-    # contents: write is enough for POST /releases/{id}/assets;
-    # releases: write covers it if the runner knows that scope
+    # the repo default GITHUB_TOKEN permission is "read and write"
+    # (see repo settings), which covers POST /releases/{id}/assets;
+    # 'releases' is not a valid key for the workflow permissions block
     permissions:
       contents: write
-      releases: write
     steps:
       - uses: actions/checkout@v4
 

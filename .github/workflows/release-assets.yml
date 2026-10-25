@@ -37,12 +37,11 @@ jobs:
           set -euo pipefail
           BASE="https://api.github.com/repos/$GITHUB_REPOSITORY"
           AUTH=(-H "Authorization: token $GITHUB_TOKEN" -H "User-Agent: zakonexport-assets")
-          VER="${TAG#v}"
           REL_ID=$(curl -sf "${AUTH[@]}" "$BASE/releases/tags/$TAG" | jq -r .id)
           echo "release $TAG id=$REL_ID"
           shopt -s nullglob
-          files=( "releases/$VER"/* )
-          [ ${#files[@]} -gt 0 ] || { echo "no files in releases/$VER"; exit 1; }
+          files=( "releases/$TAG"/* )
+          [ ${#files[@]} -gt 0 ] || { echo "no files in releases/$TAG"; exit 1; }
           for f in "${files[@]}"; do
             echo "uploading $f"
             curl -sf "${AUTH[@]}" -H "Content-Type: application/octet-stream" \

@@ -972,8 +972,9 @@ pub fn main_cli() {
             }
             println!();
             println!(
-                "Пошук нативним індексом — tsearch (експеримент); повне \
-                 покриття знаків та морфологія (.g/.gw) — v0.14.0. \
+                "Пошук нативним індексом — tsearch (експеримент); повна \
+                 таблиця знаків (cp1251-порядок, укл. і/ї) — v0.14.0; морфологія (.g/.gw) \
+та точні word→postings кордони — далі. \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())
@@ -1009,13 +1010,24 @@ pub fn main_cli() {
                 pct,
                 r.matched.len()
             );
+            // Show how each term encodes into LmCode (the full cp1251 table):
+            //   термін → hex-байти → decode (what those bytes mean).
+            for (term, bytes) in idx.encode_query(&q) {
+                let hex = bytes
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let decoded = crate::trident::decode_lm_word(&bytes);
+                println!("  код: «{term}» → [{hex}] → «{decoded}»");
+            }
             if !r.matched.is_empty() {
                 println!("  збіг: {}", r.matched.join(", "));
             }
             if r.docs.is_empty() {
                 println!(
-                    "  результат: 0 документів (таблиця знаків часткова, \
-                     точні word→postings кордони — v0.14.0)"
+                    "  результат: 0 документів (точні word→postings кордони та \
+                     join native→docnum — далі в roadmap)"
                 );
             } else {
                 let shown = r

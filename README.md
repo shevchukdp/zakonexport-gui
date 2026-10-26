@@ -170,21 +170,35 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.14.0** — Trident: **повна таблиця відповідності
+  знаків** (`src/trident.rs::LM_CHAR_TABLE`): cp1251-порядок,
+  усі слоти 0x80–0x9F (А–Я), 0xA0–0xAF (а–п), 0xE0–0xEF (р–я)
+  + українські 0xF2–0xF9 (Ґ/ґ/Є/є/І/і/Ї/ї) — підтверджено
+  через windows.kod, DLL-таблицю та реальні слова lmu.voc
+  («нема», «бути»). `tsearch` тепер кодує «конституція» на 100%
+  і показує LmCode-код + розшифровку; `п30` → 2670 документів.
+  Морфологія .g/.gw, B-tree-словник і зв'язка native-ID →
+  docnum поточної бази — v0.15.0. 84 юніт-тести. / Trident:
+  **full character correspondence**
+  (`src/trident.rs::LM_CHAR_TABLE`): cp1251 order, all
+  0x80–0x9F (А–Я), 0xA0–0xAF (а–п), 0xE0–0xEF (р–я) slots + the
+  Ukrainian 0xF2–0xF9 (Ґ/ґ/Є/є/І/і/Ї/ї) — confirmed via
+  windows.kod, the DLL keyboard table and real lmu.voc words
+  («нема», «бути»). `tsearch` now encodes «конституція» at 100%
+  and shows the LmCode encoding + decode; `п30` → 2670 docs.
+  .g/.gw morphology, the B-tree dictionary and the
+  native-ID → current docnums join — v0.15.0. 84 unit tests.
 - **v0.13.0** — Trident: експериментальний нативний рушій
   (`src/trident.rs`: декод windows.kod, lm.a, записів словника
   lmu.voc і u16 posting-потіку .vt), CLI `tsearch <query>`
   (нативні Trident-ID документів + покриття знаків), розширена
   команда `trident` (16 файлів + статистика), GUI-чекбокс
-  «Trident-рушій»; повне покриття знаків, морфологія .g/.gw і
-  зв'язка native-ID → номери поточної бази — v0.14.0, 82
-  юніт-тести. / Trident: experimental native engine
-  (`src/trident.rs`: windows.kod, lm.a, lmu.voc dictionary
-  records and the u16 posting stream decoded), CLI
+  «Trident-рушій», 82 юніт-тести. / Trident: experimental
+  native engine (`src/trident.rs`: windows.kod, lm.a, lmu.voc
+  dictionary records and the u16 posting stream decoded), CLI
   `tsearch <query>` (native Trident doc ids + char coverage),
   extended `trident` verb (16 files + stats), a GUI
-  "Trident-рушій" checkbox; full char coverage, .g/.gw
-  morphology and the native-ID → current docnums join —
-  v0.14.0, 82 unit tests.
+  "Trident-рушій" checkbox, 82 unit tests.
 - **v0.12.0** — підсвітка слів запиту в експорті (`--hl` / чекбокс
   «підсвітити слова запиту»; md `<mark>`, html `<mark class=hl>`,
   rtf/docx жовтий хайлайт; pdf/csv — пізніше), партійний друк

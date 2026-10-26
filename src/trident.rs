@@ -1,4 +1,5 @@
-//! Trident native FTS index reader (v0.13.0 — experimental).
+//! Trident native FTS index reader (v0.13.0+ — experimental; the full
+//! character correspondence landed in v0.14.0).
 //!
 //! The legacy main application (the 2002–2005 `zakon-gui.exe` suite) shipped a
 //! native full-text index in `SOFT\`. This module reads the parts of that
@@ -19,29 +20,36 @@
 //! | lmr.g/.gw   | morphology grammar / graph weights (Russian)        |
 //! | lmsup*.dll  | the 16/32-bit engine (exports `LMaster_*`)          |
 //!
-//! Word bytes live in a custom "LmCode" byte space: Cyrillic letter slots
-//! occupy 0x80–0xEF (upper-case slots 0x80–0x9F, lower-case 0xA0–0xAF and
-//! 0xE0–0xEF, plus the Ukrainian extras 0xF4–0xF9), Latin letters and digits
-//! are plain ASCII. `windows.kod` maps the app's 2-digit codes to those
-//! bytes (a raw byte when the value is >= 0x80, two ASCII hex digits below);
-//! `lm.a` holds the case-fold tables:
+//! Word bytes live in a custom "LmCode" byte space. The slot order is
+//! **cp1251-based** (confirmed by `windows.kod`, the DLL keyboard table and
+//! real `lmu.voc` words):
+//!
+//! - upper-case letters occupy 0x80–0x9F (cp1251 `А–Я` in cp1251 order);
+//! - lower-case first half 0xA0–0xAF (cp1251 `а–п`);
+//! - lower-case second half 0xE0–0xEF (cp1251 `р–я`);
+//! - the Ukrainian extras 0xF2–0xF9 (Ґ/ґ/Є/є/І/і/Ї/ї);
+//! - digits and Latin letters are plain ASCII.
+//!
+//! `windows.kod` maps cp1251 codes to those bytes (`c0–cf → 80–9f`,
+//! `e0–ef → a0–af`, `f0–ff → e0–ef`, extras `a5/b4/aa/ba/b2/b3/af/bf →
+//! f2–f9`). `lm.a` holds the case-fold tables:
 //!
 //! - `E:` — Latin identity pairs (`A a` … `Z z`);
-//! - `G:` — cross-language anchors: Latin A ↔ `84 a4` (А/а), O ↔ `96 e6`
-//!   (О/о), U ↔ `9c ec` (У/у), plus the standalone pair `9f ef` (Щ/щ);
-//! - `R:` — 32 fold pairs, Russian;
-//! - `U:` — 32 fold pairs, Ukrainian (the main range 0x9A/0x9B/0x9D is left
-//!   unused; the extras are `f4 f5`, `f6 f7`, `f8 f9`).
+//! - `G:` — cross-language anchors (Latin letters aliased to LmCode slots,
+//!   e.g. `A a : 84 a4`);
+//! - `R:` — 32 upper→lower fold pairs, Russian;
+//! - `U:` — 32 fold pairs, Ukrainian (the 0x9A/0x9B/0x9D main slots are left
+//!   unused; the extras fold `f4 f5` (Є/є), `f6 f7` (І/і), `f8 f9` (Ї/ї)).
 //!
 //! All binary files share a 0x3C header: a `FREE` marker followed by a table
 //! of u32 section offsets.
 //!
 //! What is decoded today: `windows.kod`, `lm.a`, the file headers, the
-//! dictionary records (`[0x84][word][00 00]`) and the u16 posting stream.
-//! What is still open (v0.14.0 roadmap): the full character correspondence
-//! (only the `G:`-section anchors are confirmed; the rest is a custom slot
-//! order), the `.g`/`.gw` morphology graphs, the exact per-word posting
-//! boundaries and the oracle-validated doc-number join.
+//! dictionary records (`[0x84][word][00 00]`), the u16 posting stream, and —
+//! as of v0.14.0 — the **full character correspondence** (every 0x80–0xEF
+//! slot + the 0xF2–0xF9 Ukrainian extras, see [`LM_CHAR_TABLE`]).
+//! Still open (v0.15.0 roadmap): the `.g`/`.gw` morphology graphs, the exact
+//! per-word posting boundaries and the oracle-validated doc-number join.
 //!
 //! `tsearch` is therefore labelled *experimental*: it encodes a query
 //! through the (partial) character table, looks the term up in the
@@ -273,31 +281,84 @@ pub fn parse_lm_a(data: &[u8]) -> FoldTables {
 // character -> LmCode byte (partial, documented)
 // ---------------------------------------------------------------------------
 
-/// The character -> LmCode-byte correspondence (lower-case bytes).
+/// The LmCode-byte -> character correspondence (for decoding dictionary
+/// words back to human-readable Ukrainian/Russian).
 ///
-/// Confirmed from the `lm.a` `G:`-section anchors (`A a : 84 a4`, `O o :
-/// 96 e6`, `U u : 9c ec`, `9f ef`): а/А = 0xA4/0x84, о/О = 0xE6/0x96,
-/// у/У = 0xEC/0x9C, щ/Щ = 0xEF/0x9F. Inferred from dictionary-record
-/// frequency (v0.14.0 validation): с/С = 0xAF (the most frequent letter
-/// byte), і/ї/І/Ї/и = 0xAD. Latin letters and digits are plain ASCII.
+/// This is the *inverse* of [`char_to_lm_byte`] and is the single source of
+/// truth for the custom slot order. The order is **cp1251-based**, confirmed
+/// three ways: (1) `windows.kod` maps cp1251 codes `c0–df → 80–9f`,
+/// `e0–ef → a0–af`, `f0–ff → e0–ef` plus the Ukrainian extras
+/// `a5/b4/aa/ba/b2/b3/af/bf → f2–f9`; (2) the DLL ships a keyboard-order
+/// alphabet table that decodes to the same slots; (3) the real `lmu.voc`
+/// dictionary words decode to valid Ukrainian («нема», «бути», «Мин») only
+/// under this mapping.
+pub const LM_CHAR_TABLE: &[(u8, char)] = &[
+    // upper-case block 0x80–0x9F = cp1251 0xC0–0xDF (А–Я, cp1251 order)
+    (0x80, 'А'), (0x81, 'Б'), (0x82, 'В'), (0x83, 'Г'), (0x84, 'Д'),
+    (0x85, 'Е'), (0x86, 'Ж'), (0x87, 'З'), (0x88, 'И'), (0x89, 'Й'),
+    (0x8A, 'К'), (0x8B, 'Л'), (0x8C, 'М'), (0x8D, 'Н'), (0x8E, 'О'),
+    (0x8F, 'П'), (0x90, 'Р'), (0x91, 'С'), (0x92, 'Т'), (0x93, 'У'),
+    (0x94, 'Ф'), (0x95, 'Х'), (0x96, 'Ц'), (0x97, 'Ч'), (0x98, 'Ш'),
+    (0x99, 'Щ'), (0x9A, 'Ъ'), (0x9B, 'Ы'), (0x9C, 'Ь'), (0x9D, 'Э'),
+    (0x9E, 'Ю'), (0x9F, 'Я'),
+    // lower-case first half 0xA0–0xAF = cp1251 0xE0–0xEF (а–п)
+    (0xA0, 'а'), (0xA1, 'б'), (0xA2, 'в'), (0xA3, 'г'), (0xA4, 'д'),
+    (0xA5, 'е'), (0xA6, 'ж'), (0xA7, 'з'), (0xA8, 'и'), (0xA9, 'й'),
+    (0xAA, 'к'), (0xAB, 'л'), (0xAC, 'м'), (0xAD, 'н'), (0xAE, 'о'),
+    (0xAF, 'п'),
+    // lower-case second half 0xE0–0xEF = cp1251 0xF0–0xFF (р–я)
+    (0xE0, 'р'), (0xE1, 'с'), (0xE2, 'т'), (0xE3, 'у'), (0xE4, 'ф'),
+    (0xE5, 'х'), (0xE6, 'ц'), (0xE7, 'ч'), (0xE8, 'ш'), (0xE9, 'щ'),
+    (0xEA, 'ъ'), (0xEB, 'ы'), (0xEC, 'ь'), (0xED, 'э'), (0xEE, 'ю'),
+    (0xEF, 'я'),
+    // Ukrainian specials 0xF2–0xF9 (windows.kod extras a5/b4/aa/ba/b2/b3/af/bf)
+    (0xF2, 'Ґ'), (0xF3, 'ґ'), (0xF4, 'Є'), (0xF5, 'є'),
+    (0xF6, 'І'), (0xF7, 'і'), (0xF8, 'Ї'), (0xF9, 'ї'),
+];
+
+/// Decode one LmCode byte to a character (the inverse of
+/// [`char_to_lm_byte`]). Returns `None` for bytes that are not letters
+/// (digits, ASCII, or unassigned slots 0xB0–0xDF / 0xF0–0xF1 / 0xFA–0xFF).
+pub fn lm_byte_to_char(b: u8) -> Option<char> {
+    LM_CHAR_TABLE
+        .iter()
+        .find(|(code, _)| *code == b)
+        .map(|(_, ch)| *ch)
+}
+
+/// Decode a whole LmCode word to a display string (letters to their
+/// character, digits to ASCII digits, everything else to a `·xx·` marker).
+pub fn decode_lm_word(bytes: &[u8]) -> String {
+    let mut s = String::new();
+    for &b in bytes {
+        if b >= 0x30 && b <= 0x39 {
+            s.push(b as char);
+        } else if let Some(ch) = lm_byte_to_char(b) {
+            s.push(ch);
+        } else {
+            s.push_str(&format!("·{b:02x}·"));
+        }
+    }
+    s
+}
+
+/// The character -> LmCode-byte correspondence (case-sensitive).
 ///
-/// This is *partial* — the full correspondence (the custom slot order of the
-/// 0x80–0x9F range) is the v0.14.0 work. `tsearch` reports how much of a
-/// query it could encode.
+/// The full cp1251-based slot order (see [`LM_CHAR_TABLE`]). Upper-case
+/// letters map to the 0x80–0x9F block, lower-case to 0xA0–0xEF, Ukrainian
+/// specials (і/ї/І/Ї/Є/є/Ґ/ґ) to 0xF2–0xF9, digits and Latin letters are
+/// plain ASCII. `encode_term` lower-cases first, so searches land on the
+/// lower-case slots.
 pub fn char_to_lm_byte(c: char) -> Option<u8> {
+    // Cyrillic + Ukrainian specials (both cases) come from the table;
+    // digits and Latin letters are plain ASCII.
+    if let Some((code, _)) = LM_CHAR_TABLE.iter().find(|e| e.1 == c) {
+        return Some(*code);
+    }
     match c {
-        // confirmed anchors (lm.a G section)
-        'а' | 'А' => Some(0xA4),
-        'о' | 'О' => Some(0xE6),
-        'у' | 'У' => Some(0xEC),
-        'щ' | 'Щ' => Some(0xEF),
-        // inferred from dictionary frequency (candidates, v0.14.0)
-        'с' | 'С' => Some(0xAF),
-        'і' | 'ї' | 'І' | 'Ї' | 'и' | 'И' => Some(0xAD),
-        // digits
-        '0'..='9' => Some((c as u8) - b'0' + 0x30),
-        // Latin
-        'a'..='z' | 'A'..='Z' => Some(c.to_ascii_lowercase() as u8),
+        '0'..='9' => Some(c as u8),
+        'a'..='z' => Some(c as u8),
+        'A'..='Z' => Some(c.to_ascii_uppercase() as u8),
         _ => None,
     }
 }
@@ -486,6 +547,19 @@ impl TridentIndex {
         }
     }
 
+    /// Encode the query terms through the (now full) character table and
+    /// return each term with its LmCode byte vector. Used by the CLI to show
+    /// exactly how a query maps into the native index.
+    pub fn encode_query(&self, query: &str) -> Vec<(String, Vec<u8>)> {
+        query
+            .split_whitespace()
+            .map(|t| {
+                let (bytes, _, _) = encode_term(t, &self.fold.ukr);
+                (t.to_string(), bytes)
+            })
+            .collect()
+    }
+
     /// Find the first dictionary word that starts with `prefix` (the
     /// dictionary is sorted bytewise, so a binary search for the first
     /// word >= prefix, then a prefix scan).
@@ -600,9 +674,10 @@ mod tests {
         // c-block and f-block lines (raw byte >= 0x80, some with trailing sp)
         let data = b"c4 = \x84 \r\ne4 = \xa4 \r\nf6 = \xe6 \r\n";
         let k = Kod::parse(data);
-        assert_eq!(k.code_to_byte(0xC4), Some(0x84)); // А
-        assert_eq!(k.code_to_byte(0xE4), Some(0xA4)); // а
-        assert_eq!(k.code_to_byte(0xF6), Some(0xE6)); // о
+        // cp1251 0xC4 = Д -> LmCode 0x84 (Д); 0xE4 = д -> 0xA4; 0xF6 = ц -> 0xE6
+        assert_eq!(k.code_to_byte(0xC4), Some(0x84)); // Д
+        assert_eq!(k.code_to_byte(0xE4), Some(0xA4)); // д
+        assert_eq!(k.code_to_byte(0xF6), Some(0xE6)); // ц
     }
 
     #[test]
@@ -640,13 +715,51 @@ mod tests {
     }
 
     #[test]
-    fn char_map_is_case_insensitive_and_partial() {
-        assert_eq!(char_to_lm_byte('а'), Some(0xA4));
-        assert_eq!(char_to_lm_byte('А'), Some(0xA4));
-        assert_eq!(char_to_lm_byte('О'), Some(0xE6));
-        assert_eq!(char_to_lm_byte('с'), Some(0xAF)); // inferred
+    fn char_map_is_the_full_cp1251_correspondence() {
+        // lower-case main block (cp1251 order)
+        assert_eq!(char_to_lm_byte('а'), Some(0xA0));
+        assert_eq!(char_to_lm_byte('п'), Some(0xAF));
+        assert_eq!(char_to_lm_byte('р'), Some(0xE0));
+        assert_eq!(char_to_lm_byte('я'), Some(0xEF));
+        assert_eq!(char_to_lm_byte('с'), Some(0xE1));
+        // upper-case main block
+        assert_eq!(char_to_lm_byte('А'), Some(0x80));
+        assert_eq!(char_to_lm_byte('Я'), Some(0x9F));
+        assert_eq!(char_to_lm_byte('Щ'), Some(0x99));
+        // Ukrainian specials
+        assert_eq!(char_to_lm_byte('і'), Some(0xF7));
+        assert_eq!(char_to_lm_byte('І'), Some(0xF6));
+        assert_eq!(char_to_lm_byte('ї'), Some(0xF9));
+        assert_eq!(char_to_lm_byte('Ї'), Some(0xF8));
+        assert_eq!(char_to_lm_byte('є'), Some(0xF5));
+        assert_eq!(char_to_lm_byte('Є'), Some(0xF4));
+        // digits + Latin are ASCII
         assert_eq!(char_to_lm_byte('0'), Some(0x30));
-        assert_eq!(char_to_lm_byte('к'), None); // not (yet) in the table
+        assert_eq!(char_to_lm_byte('a'), Some(0x61));
+        // unknown
+        assert_eq!(char_to_lm_byte(' '), None);
+    }
+
+    #[test]
+    fn lm_byte_to_char_round_trips() {
+        for c in [
+            'а', 'о', 'у', 'щ', 'с', 'я', 'к', 'І', 'і', 'ї', 'Ї', 'Є', 'є', 'Ґ', 'ґ', 'А', 'Я', 'Щ',
+        ] {
+            let b = char_to_lm_byte(c).expect("char must be encodable");
+            assert_eq!(lm_byte_to_char(b), Some(c), "round-trip failed for {c}");
+        }
+        // digits decode as ASCII
+        assert_eq!(lm_byte_to_char(0x33), None);
+    }
+
+    #[test]
+    fn decode_lm_word_reproduces_real_dictionary_words() {
+        // «нема» = [ad a5 ac a0] and «бути» = [a1 e3 e2 a8] (real lmu.voc
+        // records) must decode back to the source words.
+        assert_eq!(decode_lm_word(&[0xAD, 0xA5, 0xAC, 0xA0]), "нема");
+        assert_eq!(decode_lm_word(&[0xA1, 0xE3, 0xE2, 0xA8]), "бути");
+        // a word with digits + a marker
+        assert_eq!(decode_lm_word(&[0xAF, 0x33, 0x30]), "п30");
     }
 
     #[test]
@@ -655,11 +768,17 @@ mod tests {
         // "са0": every character encodable -> full coverage
         let (b, e, t) = encode_term("са0", &ft.ukr);
         assert_eq!((e, t), (3, 3));
-        assert_eq!(b, vec![0xAF, 0xA4, 0x30]);
-        // "конституція": only о/с/и/у/і encodable -> partial
+        assert_eq!(b, vec![0xE1, 0xA0, 0x30]);
+        // "конституція": the full cp1251 table now encodes every character
+        // (100% coverage), including the Ukrainian і (0xF7)
         let (b2, e2, t2) = encode_term("конституція", &ft.ukr);
-        assert_eq!((e2, t2), (5, 11));
-        assert_eq!(b2, vec![0xE6, 0xAF, 0xAD, 0xEC, 0xAD]);
+        assert_eq!((e2, t2), (11, 11));
+        assert_eq!(
+            b2,
+            vec![
+                0xAA, 0xAE, 0xAD, 0xE1, 0xE2, 0xA8, 0xE2, 0xE3, 0xE6, 0xF7, 0xEF
+            ]
+        );
     }
 
     #[test]
@@ -695,11 +814,11 @@ mod tests {
 
     #[test]
     fn search_finds_prefix_and_trims_suffixes() {
-        let mut idx = TridentIndex {
+        let idx = TridentIndex {
             baza: PathBuf::from("x"),
             kod: Kod::default(),
             fold: FoldTables::default(),
-            dict_words: vec![vec![0xAF, 0xA4, 0x30]], // "са0"
+            dict_words: vec![vec![0xE1, 0xA0, 0x30]], // "са0"
             vt_u16: vec![1, 2, 0, 3, 4, 5, 6, 7],
             inventory: Vec::new(),
         };

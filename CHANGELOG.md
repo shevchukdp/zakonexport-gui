@@ -16,6 +16,79 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.14.0 — 2026-10-26
+
+### UK
+- **Trident: ПОВНА таблиця відповідності знаків**
+  (`src/trident.rs::LM_CHAR_TABLE`) — тепер відомий повний
+  cp1251-порядок слотів LmCode, підтверджений трима незалежними
+  джерелами:
+  1. `windows.kod` кодує cp1251-байти → слоти: `c0–df → 80–9f`
+     (А–Я), `e0–ef → a0–af` (а–п), `f0–ff → e0–ef` (р–я),
+     додаткові `a5/b4/aa/ba/b2/b3/af/bf → f2–f9`;
+  2. DLL `lmsup32.dll` містить QWERTY-алфавітну таблицю, що
+     розшифровується в ті самі слоти;
+  3. реальні слова `lmu.voc` («нема», «бути», «Мин») читаються
+     коректним українським **лише** в цьому порядку.
+  Повний діапазон: великі 0x80–0x9F, малі 0xA0–0xAF і 0xE0–0xEF,
+  українські 0xF2–0xF9 (Ґ/ґ=0xF2/0xF3, Є/є=0xF4/0xF5, І/і=0xF6/0xF7,
+  Ї/ї=0xF8/0xF9). Попередні «якорі» з секції `G:` lm.a
+  (А=0x84, О=0x96, У=0x9C, Щ=0x9F) виявилися помилковим
+  прочитанням міжмовних якорів; цифри та Latin — ASCII.
+- **`tsearch` показує кодування + розшифровку**: для кожного
+  терміну `код: «термін» → [hex-байти] → «розшифрування»`.
+  «конституція» тепер кодується на **100%** (було ~45%):
+  `[aa ae ad e1 e2 a8 e2 e3 e6 f7 ef]` → «конституція» (повний
+  раунд-трип). `п30` → 2670 Trident-документів (точний збіг з
+  попереднім, але тепер без хибного с=0xAF); `с3` → 0 (власне слово).
+- Дода `lm_byte_to_char` / `decode_lm_word` (зворотний декодер) і
+  `TridentIndex::encode_query` (терміни → LmCode-байти).
+- Версія **0.13.0 → 0.14.0** (єдине джерело: `CARGO_PKG_VERSION`).
+- 84 юніт-тести (+нові: `char_map_is_the_full_cp1251_correspondence`,
+  `lm_byte_to_char_round_trips`, `decode_lm_word_reproduces_real_
+  dictionary_words`; оновлено таблицю знаків і покриття).
+
+### EN
+- **Trident: FULL character correspondence**
+  (`src/trident.rs::LM_CHAR_TABLE`) — the complete cp1251-based
+  LmCode slot order is now known, confirmed by three independent
+  sources:
+  1. `windows.kod` maps cp1251 bytes → slots: `c0–df → 80–9f`
+     (А–Я), `e0–ef → a0–af` (а–п), `f0–ff → e0–ef` (р–я), extras
+     `a5/b4/aa/ba/b2/b3/af/bf → f2–f9`;
+  2. the `lmsup32.dll` QWERTY alphabet table decodes to the same
+     slots;
+  3. the real `lmu.voc` words («нема», «бути», «Мин») read as
+     correct Ukrainian **only** under this order.
+  Full range: upper 0x80–0x9F, lower 0xA0–0xAF and 0xE0–0xEF,
+  Ukrainian 0xF2–0xF9 (Ґ/ґ=0xF2/0xF3, Є/є=0xF4/0xF5, І/і=0xF6/0xF7,
+  Ї/ї=0xF8/0xF9). The earlier `G:`-section "anchors" (А=0x84,
+  О=0x96, У=0x9C, Щ=0x9F) were a misread of the cross-language
+  anchors; digits and Latin are ASCII.
+- **`tsearch` now shows the encoding + decode**: per term
+  `code: «term» → [hex bytes] → «decoding»`. «конституція» now
+  encodes at **100%** (was ~45%):
+  `[aa ae ad e1 e2 a8 e2 e3 e6 f7 ef]` → «конституція» (full
+  round-trip). `п30` → 2670 Trident docs (exact match, now without
+  the spurious с=0xAF); `с3` → 0 (its own word).
+- Added `lm_byte_to_char` / `decode_lm_word` (the reverse decoder)
+  and `TridentIndex::encode_query` (terms → LmCode bytes).
+- Version **0.13.0 → 0.14.0** (single source: `CARGO_PKG_VERSION`).
+- 84 unit tests (+ new: `char_map_is_the_full_cp1251_correspondence`,
+  `lm_byte_to_char_round_trips`, `decode_lm_word_reproduces_real_
+  dictionary_words`; char table + coverage tests updated).
+
+### Roadmap (v0.15.0)
+- Морфологія `.g`/`.gw` (граф/ваги), B-tree-словник (повний
+  перелік слів, не лише 78 записів-референтів) і зв'язка
+  native-ID → номери документів поточної бази (оракел «конституція»
+  = 223 хіти). / The `.g`/`.gw` morphology graphs, the full B-tree
+  dictionary (not just the 78 reference records) and the
+  native-ID → current docnums join (the «конституція» oracle = 223
+  hits).
+
+---
+
 ## v0.13.0 — 2026-10-26
 
 ### UK

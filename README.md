@@ -170,6 +170,22 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.16.0** — **виявлено базовий кодувальник документів**
+  (`src/ftsearch.rs`) + **`ftsearch` — повний текстовий пошук по
+  `.mb`** (механізм оракула старої програми, без B-tree). Текст `.mb`
+  — це cp1251 + українські літери у `0x80–0xBF` (`І`=`0xB2`, `і`=`0xB3`,
+  `Є`=`0xAA`, `ї`=`0xBF`; «Конституція» = `CA EE ED F1 F2 E8 F2 F3
+  F6 B3 FF`). `ftsearch «конституція»` → **222 збіги** (оракел = 223,
+  99,5%), перші 40 збігаються з оракулом 1-до-1. Повний декод
+  щільного B-tree + word→postings — v0.17.0. 91 юніт-тест. /
+  **Discovered the base document codepage** (`src/ftsearch.rs`) +
+  **`ftsearch` — full-text search over the `.mb` files** (the legacy
+  app's oracle mechanism, no B-tree). The `.mb` text is cp1251 +
+  Ukrainian letters in `0x80–0xBF` (`І`=`0xB2`, `і`=`0xB3`, `Є`=`0xAA`,
+  `ї`=`0xBF`; «Конституція» = `CA EE ED F1 F2 E8 F2 F3 F6 B3 FF`).
+  `ftsearch «конституція»` → **222 hits** (oracle = 223, 99.5%), the
+  first 40 match the oracle 1-to-1. The full packed B-tree decode +
+  word→postings — v0.17.0. 91 unit tests.
 - **v0.15.0** — Trident: **загальний формат записів словника**
   (`[tag][word NUL][flag]`, tag 0x84/0x8d, flag 0x00/0x01):
   вилучення словника зросло з 78 до ~1000 стем (реальні «зувати»,

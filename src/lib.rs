@@ -11,6 +11,7 @@ pub mod cli;
 pub mod db;
 pub mod mdconv;
 pub mod fields;
+pub mod ftsearch;
 pub mod gui;
 pub mod highlight;
 pub mod naming;

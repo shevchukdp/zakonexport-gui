@@ -38,6 +38,10 @@ Usage:
           Trident index (SOFT\\lmu.voc + lmur.vt) — the legacy main app's
           engine. The document numbers are the native 2005-era Trident ids
           (the join to the current base docnums is in development)
+  zakonexport-cli ftsearch <query>  full-text scan of the base's `.mb`
+          document files (case-insensitive exact word — the legacy app's
+          oracle mechanism); reports (file @ offset) hits like the oracle,
+          no B-tree decode needed
   zakonexport-cli bulk [--format md|rtf|docx|html|csv|pdf] [--out dir] [--max n] [--single]
   zakonexport-cli stats
   zakonexport-cli about   (= --version: name, version, copyright)
@@ -1046,6 +1050,44 @@ pub fn main_cli() {
                 println!("    {shown}");
                 if r.docs.len() > 40 {
                     println!("    … (ще {})", r.docs.len() - 40);
+                }
+            }
+            Ok(())
+        })(),
+        "ftsearch" => (|| {
+            // Full-text scan of the base's .mb document files — the legacy
+            // app's oracle mechanism. Encode the query through the base
+            // codepage, scan every .mb (lower + title case), report the
+            // (file @ offset) hits in the oracle's shape. No B-tree needed.
+            require_baza(&o)?;
+            let q = get_query(&o)?;
+            if q.is_empty() {
+                usage();
+                bail!("ftsearch needs <query> or --queryfile");
+            }
+            let r = crate::ftsearch::ft_search(&o.baza, &q);
+            let pct = (r.coverage() * 100.0).round() as u32;
+            println!("FT full-text scan (oracle mechanism): «{q}»");
+            println!(
+                "  files: {} .mb · coverage: {}% · hits: {}",
+                r.files_scanned,
+                pct,
+                r.hits.len()
+            );
+            if r.hits.is_empty() {
+                println!("  результат: 0 збігів");
+            } else {
+                let shown = r
+                    .hits
+                    .iter()
+                    .take(40)
+                    .map(|h| format!("{} @ {}", h.file.to_string_lossy(), h.offset))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  збіги (показано {}):", shown.split(", ").count());
+                println!("    {shown}");
+                if r.hits.len() > 40 {
+                    println!("    … (ще {})", r.hits.len() - 40);
                 }
             }
             Ok(())

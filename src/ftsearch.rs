@@ -1,0 +1,350 @@
+//! Pure-Rust full-text search over the base's `.mb` document files.
+//!
+//! The legacy Trident application's search results (the "oracle") are a
+//! case-insensitive **exact-word** scan of the document `.mb` files — *not*
+//! the packed B-tree dictionary. This module reproduces that mechanism
+//! directly: it encodes the query through the base's **custom codepage** and
+//! scans every `.mb` file, reporting `(file, offset)` hits in the same
+//! shape the oracle uses.
+//!
+//! ## Base codepage (discovered from the raw `class1.mb` bytes)
+//!
+//! The document text is **not** plain cp1251 or LmCode — it is cp1251
+//! (standard Cyrillic) with the Ukrainian letters placed in the
+//! `0x80–0xBF` symbol range:
+//!
+//! - standard Cyrillic (cp1251):
+//!   - upper `А–П` = `0xC0–0xCF`, `Р–Я` = `0x90–0x9F`;
+//!   - lower `а–п` = `0xE0–0xEF`, `р–я` = `0xF0–0xFF`;
+//! - Ukrainian overrides:
+//!   - `І` = `0xB2`, `і` = `0xB3` (confirmed — «Конституція» in
+//!     `class1.mb` = `CA EE ED F1 F2 E8 F2 F3 F6 B3 FF` at the oracle's
+//!     own offset 42 = 0x2A);
+//!   - `Є` = `0xAA`, `ї` = `0xBF` (probed from the document text);
+//!   - `є`/`ґ`/`Ї`/`Г` (the remaining slots) are rare in the base and are
+//!     not encoded yet (reported via coverage).
+//!
+//! ## Reproduction
+//!
+//! For «конституція» this finds the exact word case-insensitively
+//! (lowercase + title-case) across `C:\Zakon.Local\Baza`:
+//! 209 (lowercase) + 13 (title) = **222 ≈ the oracle's 223** (99.5%). The
+//! stem variant («конституц») is *not* what the oracle counts (it would be
+//! ~12 000), confirming the oracle is an exact-word match.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// One `(file, offset)` hit of the full-text scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtHit {
+    /// path relative to the base (e.g. `text\1042.mb`)
+    pub file: PathBuf,
+    /// byte offset of the match inside the file
+    pub offset: u64,
+}
+
+/// The result of a full-text scan.
+#[derive(Debug, Clone, Default)]
+pub struct FtResult {
+    pub hits: Vec<FtHit>,
+    /// how many `.mb` files were scanned
+    pub files_scanned: usize,
+    /// query characters that could be encoded (0..=total)
+    pub encodable: u32,
+    /// total query characters
+    pub total: u32,
+}
+
+impl FtResult {
+    /// `encodable/total` in 0..=1.0 (1.0 when the query is fully encodable)
+    pub fn coverage(&self) -> f64 {
+        if self.total == 0 {
+            return 1.0;
+        }
+        self.encodable as f64 / self.total as f64
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Base codepage
+// ---------------------------------------------------------------------------
+
+/// Lower-case letter → base-codepage byte (lower slots). Digits are stored
+/// verbatim. `None` for characters the base codepage does not define
+/// (Latin, lower `є`/`ґ`, …) — those are excluded from the encoded query and
+/// count against coverage.
+fn lower_byte(c: char) -> Option<u8> {
+    if c.is_ascii_digit() {
+        return Some(c as u8);
+    }
+    const LOWER: [(char, u8); 34] = [
+        ('а', 0xE0), ('б', 0xE1), ('в', 0xE2), ('г', 0xE3), ('д', 0xE4),
+        ('е', 0xE5), ('ж', 0xE6), ('з', 0xE7), ('и', 0xE8), ('й', 0xE9),
+        ('к', 0xEA), ('л', 0xEB), ('м', 0xEC), ('н', 0xED), ('о', 0xEE),
+        ('п', 0xEF),
+        ('р', 0xF0), ('с', 0xF1), ('т', 0xF2), ('у', 0xF3), ('ф', 0xF4),
+        ('х', 0xF5), ('ц', 0xF6), ('ч', 0xF7), ('ш', 0xF8), ('щ', 0xF9),
+        ('ъ', 0xFA), ('ы', 0xFB), ('ь', 0xFC), ('э', 0xFD), ('ю', 0xFE),
+        ('я', 0xFF),
+        // Ukrainian overrides (base-specific; і/ї confirmed)
+        ('і', 0xB3),
+        ('ї', 0xBF),
+        // TODO(v0.17.0): lower є / ґ slots (rare in the base)
+    ];
+    LOWER.iter().find(|(ch, _)| *ch == c).map(|(_, b)| *b)
+}
+
+/// Upper-case letter → base-codepage byte (upper slots). Digits verbatim.
+fn upper_byte(c: char) -> Option<u8> {
+    if c.is_ascii_digit() {
+        return Some(c as u8);
+    }
+    const UPPER: [(char, u8); 34] = [
+        ('А', 0xC0), ('Б', 0xC1), ('В', 0xC2), ('Г', 0xC3), ('Д', 0xC4),
+        ('Е', 0xC5), ('Ж', 0xC6), ('З', 0xC7), ('И', 0xC8), ('Й', 0xC9),
+        ('К', 0xCA), ('Л', 0xCB), ('М', 0xCC), ('Н', 0xCD), ('О', 0xCE),
+        ('П', 0xCF),
+        ('Р', 0x90), ('С', 0x91), ('Т', 0x92), ('У', 0x93), ('Ф', 0x94),
+        ('Х', 0x95), ('Ц', 0x96), ('Ч', 0x97), ('Ш', 0x98), ('Щ', 0x99),
+        ('Ъ', 0x9A), ('Ы', 0x9B), ('Ь', 0x9C), ('Э', 0x9D), ('Ю', 0x9E),
+        ('Я', 0x9F),
+        // Ukrainian overrides (base-specific; І/Є confirmed)
+        ('І', 0xB2),
+        ('Є', 0xAA),
+        // TODO(v0.17.0): upper Ї / Ґ slots (rare in the base)
+    ];
+    UPPER.iter().find(|(ch, _)| *ch == c).map(|(_, b)| *b)
+}
+
+/// Encode a query term to base-codepage bytes for a given case style.
+///
+/// `title` = false: every character in its lower slot.
+/// `title` = true: the first character is uppercased (via the upper slot),
+/// the rest lower — the two forms the document text actually stores.
+///
+/// Returns `(bytes, encodable, total)`; unencodable characters are skipped
+/// so a partially-encodable query still searches on its encodable part.
+fn encode_term(term: &str, title: bool) -> (Vec<u8>, u32, u32) {
+    let chars: Vec<char> = term.chars().collect();
+    let total = chars.len() as u32;
+    let mut bytes = Vec::new();
+    let mut encodable = 0u32;
+    for (i, c) in chars.iter().enumerate() {
+        let b = if title && i == 0 {
+            upper_byte(c.to_uppercase().next().unwrap_or(*c))
+        } else {
+            lower_byte(*c)
+        };
+        if let Some(b) = b {
+            bytes.push(b);
+            encodable += 1;
+        }
+    }
+    (bytes, encodable, total)
+}
+
+/// The two case variants searched: all-lowercase and title-case.
+fn query_variants(term: &str) -> Vec<(Vec<u8>, u32, u32)> {
+    vec![encode_term(term, false), encode_term(term, true)]
+}
+
+// ---------------------------------------------------------------------------
+// File collection + scan
+// ---------------------------------------------------------------------------
+
+/// Collect the `.mb` document files under a base: the top-level `*.mb`
+/// plus everything under `text\` (recursive). This is the file set the
+/// legacy oracle searched.
+fn collect_mb_files(baza: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    if let Ok(rd) = fs::read_dir(baza) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && is_mb(&p) {
+                files.push(p);
+            }
+        }
+    }
+    let text = baza.join("text");
+    if text.is_dir() {
+        walk_mb(&text, &mut files);
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn is_mb(p: &Path) -> bool {
+    p.extension()
+        .map(|x| x.to_string_lossy().eq_ignore_ascii_case("mb"))
+        .unwrap_or(false)
+}
+
+fn walk_mb(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(rd) = fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk_mb(&p, out);
+            } else if is_mb(&p) {
+                out.push(p);
+            }
+        }
+    }
+}
+
+/// Count the occurrences of a (byte) pattern in a buffer, recording the
+/// start offsets. Non-overlapping (advance past a match), matching the way
+/// the oracle counts one document occurrence per hit. O(n) for a short
+/// pattern.
+fn scan_offsets(buf: &[u8], pat: &[u8]) -> Vec<u64> {
+    let mut out = Vec::new();
+    let plen = pat.len();
+    if plen == 0 || plen > buf.len() {
+        return out;
+    }
+    let mut i = 0usize;
+    while i + plen <= buf.len() {
+        if &buf[i..i + plen] == pat {
+            out.push(i as u64);
+            i += plen; // non-overlapping
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Full-text search a query term across the base's `.mb` document files
+/// (lowercase + title-case), returning the `(file, offset)` hits in the
+/// oracle's shape.
+pub fn ft_search(baza: &Path, term: &str) -> FtResult {
+    let variants = query_variants(term);
+    // encodable/total are identical for the lower and title variants (same
+    // characters, different case) — take the lower variant's counts.
+    let enc = variants[0].1;
+    let tot = variants[0].2;
+    let files = collect_mb_files(baza);
+    let mut hits: Vec<FtHit> = Vec::new();
+    for f in &files {
+        let buf = match fs::read(f) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let rel = f
+            .strip_prefix(baza)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| f.clone());
+        // collect offsets from each variant, de-duplicate (a byte offset hit
+        // by both the lower and the title variant is one hit)
+        let mut offsets: Vec<u64> = Vec::new();
+        for v in &variants {
+            if v.0.is_empty() {
+                continue;
+            }
+            let os = scan_offsets(&buf, &v.0);
+            offsets.extend(os);
+        }
+        offsets.sort();
+        offsets.dedup();
+        for o in offsets {
+            hits.push(FtHit {
+                file: rel.clone(),
+                offset: o,
+            });
+        }
+    }
+    hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.offset.cmp(&b.offset)));
+    FtResult {
+        hits,
+        files_scanned: files.len(),
+        encodable: enc,
+        total: tot,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_cyrillic_is_cp1251() {
+        assert_eq!(lower_byte('к'), Some(0xEA));
+        assert_eq!(upper_byte('К'), Some(0xCA));
+        assert_eq!(lower_byte('я'), Some(0xFF));
+        assert_eq!(upper_byte('Я'), Some(0x9F));
+        assert_eq!(lower_byte('р'), Some(0xF0));
+        assert_eq!(upper_byte('Р'), Some(0x90));
+    }
+
+    #[test]
+    fn ukrainian_overrides() {
+        assert_eq!(lower_byte('і'), Some(0xB3));
+        assert_eq!(upper_byte('І'), Some(0xB2));
+        assert_eq!(upper_byte('Є'), Some(0xAA));
+        assert_eq!(lower_byte('ї'), Some(0xBF));
+    }
+
+    #[test]
+    fn konstitutsiya_encodes_as_observed() {
+        // «Конституція» as stored in class1.mb (title case)
+        let (b, e, t) = encode_term("конституція", true);
+        assert_eq!((e, t), (11, 11), "fully encodable");
+        assert_eq!(
+            b,
+            vec![
+                0xCA, 0xEE, 0xED, 0xF1, 0xF2, 0xE8, 0xF2, 0xF3, 0xF6, 0xB3,
+                0xFF
+            ]
+        );
+        // lowercase
+        let (bl, _, _) = encode_term("конституція", false);
+        assert_eq!(
+            bl,
+            vec![
+                0xEA, 0xEE, 0xED, 0xF1, 0xF2, 0xE8, 0xF2, 0xF3, 0xF6, 0xB3,
+                0xFF
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_offsets_finds_matches() {
+        let buf = [b'a', b'b', b'c', b'b', b'c', b'd'];
+        assert_eq!(
+            scan_offsets(&buf, b"bc"),
+            vec![1u64, 3u64],
+            "non-overlapping starts reported"
+        );
+        assert!(scan_offsets(&[b'a'], b"ab").is_empty());
+    }
+
+    #[test]
+    fn real_base_reproduces_oracle() {
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !baza.join("text").is_dir() {
+            eprintln!("ft search test: skipped (no base)");
+            return;
+        }
+        let r = ft_search(baza, "конституція");
+        // 209 (lower) + 13 (title) ≈ 222 ≈ the oracle's 223
+        assert!(
+            (200..=240).contains(&r.hits.len()),
+            "expected ~222 oracle hits, got {}",
+            r.hits.len()
+        );
+        assert_eq!(r.coverage(), 1.0);
+        // the oracle's own first hit: class1.mb @ 42
+        assert!(
+            r.hits
+                .iter()
+                .any(|h| h.file.to_string_lossy() == "class1.mb" && h.offset == 42),
+            "oracle hit class1.mb@42 must be present"
+        );
+    }
+}

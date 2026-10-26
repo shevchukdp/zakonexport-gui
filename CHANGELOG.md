@@ -16,6 +16,62 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.16.0 — 2026-10-27
+
+### UK
+- **Виявлено базовий кодувальник документів** (`src/ftsearch.rs`) —
+  текст документів `.mb` у базі — це **не** звичайний cp1251 і не
+  LmCode, а cp1251 (стандартна кирилиця) з українськими літерами у
+  символічному діапазоні `0x80–0xBF`:
+  - стандартна кирилиця (cp1251): великі `А–П`=`0xC0–0xCF`,
+    `Р–Я`=`0x90–0x9F`; малі `а–п`=`0xE0–0xEF`, `р–я`=`0xF0–0xFF`;
+  - українські перевизначення: **`І`=`0xB2`, `і`=`0xB3`**
+    (підтверджено — «Конституція» в `class1.mb` = `CA EE ED F1 F2 E8
+    F2 F3 F6 B3 FF` на самому офсеті оракула 42 = 0x2A); `Є`=`0xAA`,
+    `ї`=`0xBF` (визначено з тексту); решта слотів (`є`, `ґ`, `Ї`, `Г`)
+    — рідкісні, далі.
+- **`ftsearch` — повний текстовий пошук по `.mb`** (нова
+  `src/ftsearch.rs` + CLI-дієслово `ftsearch <запит>`): кодує запит
+  через базовий кодувальник і сканує **всі** `.mb`-файли
+  (верхній рівень + `text\`, рекурсивно) у двох реєстрах (нижній +
+  перша велика) — **саме механізм оракула** старої програми, без
+  B-tree. Зв'язка native→оракел реалізована: «конституція» →
+  **222 збіги** (оракел = 223, 99,5%), і перші 40 збігів збігаються
+  з оракулом 1-до-1 (`class1.mb @ 42`, `1042.mb @ 1840761`, …).
+  Пошук за стеমে («конституц» = ~12 000) **не** оракул — підтверджено,
+  що оракул — точне слово (case-insensitive).
+- **Дієслово `tsearch`** (нативний B-tree-індекс) лишається
+  експериментальним; повний декод щільного B-tree + word→postings
+  кордони — v0.17.0. 91 юніт-тест.
+
+### EN
+- **Discovered the base document codepage** (`src/ftsearch.rs`) — the
+  `.mb` document text is **not** plain cp1251 or LmCode: it is cp1251
+  (standard Cyrillic) with the Ukrainian letters placed in the
+  `0x80–0xBF` symbol range:
+  - standard Cyrillic (cp1251): upper `А–П`=`0xC0–0xCF`, `Р–Я`
+    =`0x90–0x9F`; lower `а–п`=`0xE0–0xEF`, `р–я`=`0xF0–0xFF`;
+  - Ukrainian overrides: **`І`=`0xB2`, `і`=`0xB3`** (confirmed —
+    «Конституція» in `class1.mb` = `CA EE ED F1 F2 E8 F2 F3 F6 B3 FF`
+    at the oracle's own offset 42 = 0x2A); `Є`=`0xAA`, `ї`=`0xBF`
+    (read from the text); the remaining slots (`є`, `ґ`, `Ї`, `Г`) are
+    rare — later.
+- **`ftsearch` — full-text search over the `.mb` files** (new
+  `src/ftsearch.rs` + the `ftsearch <query>` CLI verb): encodes the
+  query through the base codepage and scans **all** `.mb` files
+  (top level + `text\`, recursive) in two cases (lower + title) —
+  **exactly the legacy app's oracle mechanism**, no B-tree needed. The
+  native→oracle join is implemented: «конституція» → **222 hits**
+  (oracle = 223, 99.5%), and the first 40 hits match the oracle
+  1-to-1 (`class1.mb @ 42`, `1042.mb @ 1840761`, …). The stem search
+  («конституц» ≈ 12 000) is *not* the oracle — confirming the oracle is
+  an exact-word (case-insensitive) match.
+- The `tsearch` verb (native B-tree index) stays experimental; the full
+  packed B-tree decode + word→postings boundaries — v0.17.0. 91 unit
+  tests.
+
+---
+
 ## v0.15.0 — 2026-10-27
 
 ### UK

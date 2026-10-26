@@ -170,6 +170,23 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.15.0** — Trident: **загальний формат записів словника**
+  (`[tag][word NUL][flag]`, tag 0x84/0x8d, flag 0x00/0x01):
+  вилучення словника зросло з 78 до ~1000 стем (реальні «зувати»,
+  «раст», «зват», «дити»), структурне декодування `.gw` (u16
+  таблиця морфологічних ваг, бит 0x8000), задокументовано
+  розкладку word-структур B-tree (NULL-термінований масив
+  вказівників, case-fold порівняння з DLL). `tsearch` тепер
+  влучає реальні стеми («раст» → 279, «зват» → 294 документів);
+  «конституція» лишається 0 (щільний B-tree — далі). 86 юніт-тестів. /
+  Trident: **general dictionary record format** (`[tag][word NUL][flag]`,
+  tag 0x84/0x8d, flag 0x00/0x01): dictionary extraction grew 78 → ~1000
+  stems (real «зувати», «раст», «зват», «дити»), structural decode of
+  `.gw` (the u16 morphology-weight table, 0x8000 flag bit), and the
+  B-tree word-struct layout documented (NULL-terminated pointer array +
+  case-fold comparator, from the DLL). `tsearch` now hits real stems
+  («раст» → 279, «зват» → 294 docs); «конституція» stays 0 (packed
+  B-tree — next). 86 unit tests.
 - **v0.14.0** — Trident: **повна таблиця відповідності
   знаків** (`src/trident.rs::LM_CHAR_TABLE`): cp1251-порядок,
   усі слоти 0x80–0x9F (А–Я), 0xA0–0xAF (а–п), 0xE0–0xEF (р–я)

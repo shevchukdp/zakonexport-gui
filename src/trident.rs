@@ -45,11 +45,20 @@
 //! of u32 section offsets.
 //!
 //! What is decoded today: `windows.kod`, `lm.a`, the file headers, the
-//! dictionary records (`[0x84][word][00 00]`), the u16 posting stream, and —
-//! as of v0.14.0 — the **full character correspondence** (every 0x80–0xEF
-//! slot + the 0xF2–0xF9 Ukrainian extras, see [`LM_CHAR_TABLE`]).
-//! Still open (v0.15.0 roadmap): the `.g`/`.gw` morphology graphs, the exact
-//! per-word posting boundaries and the oracle-validated doc-number join.
+//! dictionary records (`[tag][word NUL][flag]`, tag 0x84/0x8d, flag
+//! 0x00/0x01 — the general word-record format from `lmu.voc`), the u16
+//! posting stream, the `.gw` morphology weight table (structural decode),
+//! and — as of v0.14.0 — the **full character correspondence** (every
+//! 0x80–0xEF slot + the 0xF2–0xF9 Ukrainian extras, see [`LM_CHAR_TABLE`]).
+//!
+//! v0.15.0 additionally documents the DLL word-lookup structure: the in-memory
+//! dictionary is a NULL-terminated array of word-struct pointers, each struct
+//! holding NUL-terminated LmCode word bytes at +1 plus postings/flag fields;
+//! the comparator folds each byte through the cp1251 mapper.
+//! Still open (next increment): the full **packed B-tree** word set (which is
+//! where «конституція» lives — it is not a raw byte run in `lmu.voc`), the
+//! `.g` grammar-graph semantics, the exact per-word posting boundaries and the
+//! oracle-validated doc-number join.
 //!
 //! `tsearch` is therefore labelled *experimental*: it encodes a query
 //! through the (partial) character table, looks the term up in the
@@ -404,6 +413,8 @@ pub struct TridentIndex {
     pub dict_words: Vec<Vec<u8>>,
     /// the u16 posting stream from `.vt` (raw)
     pub vt_u16: Vec<u16>,
+    /// the morphology weight table from `.gw` (raw u16, 0x8000 flag bit)
+    pub gw_u16: Vec<u16>,
     pub inventory: Vec<InventoryFile>,
 }
 
@@ -411,7 +422,8 @@ pub struct TridentIndex {
 #[derive(Debug, Clone, Default)]
 pub struct TridentResult {
     /// native document ids read from `.vt` (experimental — the exact
-    /// per-word boundary decode is v0.14.0)
+    /// per-word posting boundary decode is a roadmap item; as of v0.15.0 the
+    /// dictionary extraction is the general `[tag][word NUL][flag]` format)
     pub docs: Vec<u32>,
     /// the terms that were found in the dictionary
     pub matched: Vec<String>,
@@ -464,6 +476,8 @@ impl TridentIndex {
 
         let dict_words = extract_dict_words(&voc);
         let vt_u16 = read_vt_u16(&vt);
+        // optional morphology weight table (lmu.gw) — structural decode only
+        let gw_u16 = read("lmu.gw").as_deref().map(read_gw_u16).unwrap_or_default();
 
         let inventory: Vec<InventoryFile> = INVENTORY
             .iter()
@@ -480,6 +494,7 @@ impl TridentIndex {
             fold,
             dict_words,
             vt_u16,
+            gw_u16,
             inventory,
         })
     }
@@ -591,8 +606,12 @@ impl TridentIndex {
     }
 
     /// Read a posting slice for a dictionary word index (experimental
-    /// proportional heuristic — the exact per-word boundaries come from the
-    /// `.m`/`.voc` index in v0.14.0).
+    /// proportional heuristic: the vt stream is divided evenly across the
+    /// extracted dictionary words). Because the dictionary extraction grew
+    /// from 78 to ~1000 words in v0.15.0, the per-word slice — and hence the
+    /// reported doc count — is an estimate that scales with the dictionary
+    /// size. The exact per-word boundaries (and the oracle-validated
+    /// doc-number join) come from the packed B-tree decode (roadmap).
     fn posting_slice(&self, word_idx: usize) -> Vec<u32> {
         if self.vt_u16.is_empty() || self.dict_words.is_empty() {
             return Vec::new();
@@ -611,23 +630,56 @@ impl TridentIndex {
     }
 }
 
-/// Extract the dictionary records `[0x84][word][00 00]` from a `.voc` file.
+/// Extract the dictionary records from a `.voc` file.
+///
+/// A word record is `[tag][word][flag]` where:
+/// - `tag` is a single byte with the high bit set (0x80–0xFF; the common
+///   values are 0x84 and 0x8d);
+/// - `word` is a NUL-terminated run of LmCode bytes (Cyrillic 0x80–0xFF or
+///   ASCII digits 0x30–0x39), 1–12 bytes long; the trailing bytes are often
+///   morphological-class codes (e.g. `зувати0`, `титиь33`);
+/// - `flag` is one trailing byte (observed 0x00 and 0x01).
 ///
 /// The records are interleaved with B-tree pages, so this is a scan: at each
 /// offset that starts a valid record, record it and jump past it; otherwise
-/// advance one byte. The result is de-duplicated and sorted.
+/// advance one byte. The forward scan is bounded (12 bytes) so the whole
+/// extraction is O(n). The result is de-duplicated and sorted.
+///
+/// This is a superset of the old strict `[0x84][word][00 00]` heuristic: the
+/// real `lmu.voc` yields ~1000 unique stems (vs. 78 before), including real
+/// Ukrainian stems such as `зувати`, `расти` and `дити`.
 pub fn extract_dict_words(voc: &[u8]) -> Vec<Vec<u8>> {
+    const MAX_WORD: usize = 12;
     let mut out: Vec<Vec<u8>> = Vec::new();
     let mut p = 0x80usize;
-    while p + 2 < voc.len() {
-        if voc[p] == 0x84 {
-            let mut w = 1usize;
-            while p + w < voc.len() && voc[p + w] != 0x00 {
+    let n = voc.len();
+    while p + 2 < n {
+        let tag = voc[p];
+        if tag >= 0x80 {
+            // Read up to MAX_WORD word bytes; stop at a NUL terminator or an
+            // invalid byte.
+            let mut word = [0u8; MAX_WORD];
+            let mut wl = 0usize;
+            let mut w = p + 1;
+            let mut valid = true;
+            while wl < MAX_WORD && w < n {
+                let b = voc[w];
+                if b == 0x00 {
+                    break; // NUL terminator reached
+                }
+                if !(b >= 0x30 && b <= 0x39 || b >= 0x80) {
+                    valid = false;
+                    break;
+                }
+                word[wl] = b;
+                wl += 1;
                 w += 1;
             }
-            if (1..=6).contains(&w) && voc[p + w] == 0x00 && voc[p + w + 1] == 0x00 {
-                out.push(voc[p + 1..p + w].to_vec());
-                p += w + 2;
+            // A valid record: 1..=MAX_WORD word bytes, a NUL terminator, and a
+            // flag byte after it.
+            if valid && (1..=MAX_WORD).contains(&wl) && w < n && voc[w] == 0x00 && w + 1 < n {
+                out.push(word[..wl].to_vec());
+                p = w + 2;
                 continue;
             }
         }
@@ -636,6 +688,21 @@ pub fn extract_dict_words(voc: &[u8]) -> Vec<Vec<u8>> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Read the morphology weight table from a `.gw` file.
+///
+/// A `.gw` file is a flat little-endian u16 array (no header): 268 bytes for
+/// `lmu.gw` (134 values) / 264 bytes for `lmr.gw` (132 values). Each u16 is a
+/// morphological-class weight; the `0x8000` bit is a flag (observed set on
+/// the last few entries, e.g. `8053 8054 8057 8058`). The values are the
+/// weights of the grammar graph in the accompanying `.g` file (header
+/// "Trident Software, Inc. / grammar / UTEMPLATE.TXT"), so a full semantic
+/// decode needs the `.g` grammar (roadmap).
+pub fn read_gw_u16(gw: &[u8]) -> Vec<u16> {
+    (0..gw.len() / 2)
+        .map(|i| u16::from_le_bytes([gw[i * 2], gw[i * 2 + 1]]))
+        .collect()
 }
 
 /// Read the u16 posting stream from a `.vt` file (data starts at 0x40).
@@ -801,6 +868,52 @@ mod tests {
     }
 
     #[test]
+    fn extract_dict_words_captures_tag_and_flag_variants() {
+        // general record format: [tag>=0x80][word NUL][flag]
+        // covers a 0x8d tag, a 0x01 flag, and a real stem "зувати0"
+        let mut voc = vec![0u8; 0x100];
+        // 0x80: [8d][a4 aa 31][00][00]  ("дк1", tag 0x8d, flag 0x00)
+        voc[0x80] = 0x8d;
+        voc[0x81] = 0xA4;
+        voc[0x82] = 0xAA;
+        voc[0x83] = 0x31;
+        voc[0x84] = 0x00;
+        voc[0x85] = 0x00;
+        // 0x86: [84][ad 33 ae][00][01]  ("н3о", tag 0x84, flag 0x01)
+        voc[0x86] = 0x84;
+        voc[0x87] = 0xAD;
+        voc[0x88] = 0x33;
+        voc[0x89] = 0xAE;
+        voc[0x8A] = 0x00;
+        voc[0x8B] = 0x01;
+        // 0x8C: [84][a7 e3 a2 a0 e2 a8 30][00][00]  ("зувати0")
+        voc[0x8C] = 0x84;
+        voc[0x8D] = 0xA7;
+        voc[0x8E] = 0xE3;
+        voc[0x8F] = 0xA2;
+        voc[0x90] = 0xA0;
+        voc[0x91] = 0xE2;
+        voc[0x92] = 0xA8;
+        voc[0x93] = 0x30;
+        voc[0x94] = 0x00;
+        voc[0x95] = 0x00;
+        let words = extract_dict_words(&voc);
+        // all three records captured, including the 0x8d tag and 0x01 flag
+        assert!(words.contains(&vec![0xA4, 0xAA, 0x31]));
+        assert!(words.contains(&vec![0xAD, 0x33, 0xAE]));
+        assert!(words.contains(&vec![0xA7, 0xE3, 0xA2, 0xA0, 0xE2, 0xA8, 0x30]));
+        assert_eq!(words.len(), 3);
+    }
+
+    #[test]
+    fn read_gw_u16_reads_le_values() {
+        let gw = vec![0x44, 0x00, 0x53, 0x80, 0x00, 0x00];
+        // little-endian; the 0x8000 flag bit is preserved
+        assert_eq!(read_gw_u16(&gw), vec![0x0044, 0x8053, 0x0000]);
+        assert!(read_gw_u16(&[]).is_empty());
+    }
+
+    #[test]
     fn read_vt_u16_reads_from_0x40() {
         let mut vt = vec![0u8; 0x50];
         vt[0x40] = 0x2A; // 0x122A little-endian
@@ -820,6 +933,7 @@ mod tests {
             fold: FoldTables::default(),
             dict_words: vec![vec![0xE1, 0xA0, 0x30]], // "са0"
             vt_u16: vec![1, 2, 0, 3, 4, 5, 6, 7],
+            gw_u16: Vec::new(),
             inventory: Vec::new(),
         };
         let r = idx.search("а0"); // encodes to [0xA4, 0x30] — no match
@@ -843,8 +957,16 @@ mod tests {
         assert!(idx.kod.len() > 50, "windows.kod should have many codes");
         assert_eq!(idx.fold.rus.len(), 32, "real R section has 32 pairs");
         assert_eq!(idx.fold.ukr.len(), 32, "real U section has 32 pairs");
-        assert!(!idx.dict_words.is_empty(), "dict should have words");
+        assert!(
+            idx.dict_words.len() >= 500,
+            "the general record format should yield ~1000 words, got {}",
+            idx.dict_words.len()
+        );
         assert!(!idx.vt_u16.is_empty(), "vt should have a u16 stream");
+        // the .gw weight table (lmu.gw) decodes to a u16 array; when the file
+        // is present in the base it must be non-empty
+        let has_gw = baza.join("SOFT").join("lmu.gw").is_file();
+        assert_eq!(idx.gw_u16.is_empty(), !has_gw);
         // the inventory must list 16 files, all present in this base
         assert_eq!(idx.inventory.len(), 16);
         assert!(idx.inventory.iter().all(|f| f.size > 0));

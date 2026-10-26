@@ -16,6 +16,72 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.15.0 — 2026-10-27
+
+### UK
+- **Trident: ЗАГАЛЬНИЙ формат записів словника**
+  (`src/trident.rs::extract_dict_words`) — формат запису
+  `[tag][word NUL][flag]` (tag 0x84/0x8d, flag 0x00/0x01), а не лише
+  суворий `[0x84][word][00 00]`. Вилучення словника з `lmu.voc`
+  зросло з **78 до ~1002 унікальних стем** (O(n)-скан з обмеженим
+  12-байтовим пошуком вперед). Словник тепер містить реальні
+  українські стеми — «зувати», «раст»/«ряст», «зват», «дити»,
+  «овувати» — разом із морфологічними клас-кодами (`зувати0`,
+  `титиь33`).
+- **`.gw` — морфологічна таблиця ваг** (`read_gw_u16`):
+  `lmu.gw` (268 B = 134 u16) / `lmr.gw` (264 B = 132 u16) —
+  плоский little-endian u16-масив без заголовка; бит `0x8000` —
+  прапорець (ставиться на останніх записах, напр. `8053 8054 8057
+  8058`). Завантажується в `TridentIndex::gw_u16` (структурне
+  декодування; повний семантичний декод потребує графу `.g` —
+  roadmap).
+- **Б-дерево / word-структури задокументовано** (з `lmsup32.dll`):
+  пошук слова `FUN_10021520` = лінійний скан **NULL-термінованого
+  масиву вказівників на word-структури**; word-байти NUL-терміновані
+  за offset +1 у структурі (≥0xe1 байт, поля: +0xc0 ptr, +0xd5/+0xd7
+  flag-байти, +0xdd ptr); порівняння — `FUN_1001bca0` (case-fold:
+  кожен байт через `FUN_10011930(x,0x80)`). «конституція»
+  (`aa ae ad e1 …`) **немає** як сирого байт-рядка в `lmu.voc`
+  (0 збігів) — повний набір слів у **щільному (Patricia-) B-дереві**,
+  декод якого — наступний крок.
+- **`tsearch` влучає реальні стеми**: «раст» → 279 документів,
+  «зват» → 294 документів (раніше 0). «п30» → 310 (було 2670 —
+  пропорційна оцінка тепер ділиться на повний словник 1002 слова, а
+  не 78). «конституція» → 0 (щільне B-дерево + join native-ID →
+  docnum поточної бази — далі в roadmap). 86 юніт-тестів.
+
+### EN
+- **Trident: GENERAL dictionary record format**
+  (`src/trident.rs::extract_dict_words`) — the record format is
+  `[tag][word NUL][flag]` (tag 0x84/0x8d, flag 0x00/0x01), not only
+  the strict `[0x84][word][00 00]`. Extraction from `lmu.voc` grew
+  from **78 to ~1002 unique stems** (O(n) scan with a bounded 12-byte
+  forward look). The dictionary now contains real Ukrainian stems —
+  «зувати», «раст»/«ряст», «зват», «дити», «овувати» — together with
+  morphological class-codes (`зувати0`, `титиь33`).
+- **`.gw` — morphology weight table** (`read_gw_u16`):
+  `lmu.gw` (268 B = 134 u16) / `lmr.gw` (264 B = 132 u16) — a flat
+  little-endian u16 array with no header; the `0x8000` bit is a flag
+  (set on the last entries, e.g. `8053 8054 8057 8058`). Loaded into
+  `TridentIndex::gw_u16` (structural decode; the full semantic decode
+  needs the `.g` grammar graph — roadmap).
+- **B-tree / word-struct layout documented** (from `lmsup32.dll`):
+  word lookup `FUN_10021520` = linear scan of a **NULL-terminated
+  array of word-struct pointers**; word bytes are NUL-terminated at
+  offset +1 in the struct (≥0xe1 bytes; fields +0xc0 ptr, +0xd5/+0xd7
+  flag bytes, +0xdd ptr); comparison — `FUN_1001bca0` (case-fold:
+  each byte through `FUN_10011930(x,0x80)`). «конституція»
+  (`aa ae ad e1 …`) is **absent** as a raw byte run in `lmu.voc`
+  (0 hits) — the full word set lives in the **packed (Patricia)
+  B-tree**, whose decode is the next increment.
+- **`tsearch` now hits real stems**: «раст» → 279 docs, «зват» → 294
+  docs (was 0). «п30» → 310 (was 2670 — the proportional estimate now
+  divides by the full 1002-word dictionary, not 78). «конституція» →
+  0 (packed B-tree + native-ID → current docnums join — next on the
+  roadmap). 86 unit tests.
+
+---
+
 ## v0.14.0 — 2026-10-26
 
 ### UK

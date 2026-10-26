@@ -37,7 +37,22 @@
   (закладки/содержимое PDF, кликабельные Dest на стартовую страницу).
 - **GDI-друк** (без Word и других приложений): системный диалог печати
   (`PrintDlg`), GDI-цикл страниц, отмена → статус «відмінено», не ошибка.
-  CLI: `print <docnum>`; в GUI — кнопка «Друк» в окне предпросмотра.
+  CLI: `print <docnum> [docnum ...]` (партия: пробел/кома, диапазоны
+  `1-5`; диалог печати — на каждый документ, статус — построчно);
+  в GUI — кнопка «Друк» в окне предпросмотра.
+- **Подсветка слов запроса в экспорте** (`--hl`, алиас `--highlight`,
+  чекбокс «підсвітити слова запиту» в GUI): слова запроса (≥2 знака,
+  без учёта регистра) подсвечиваются в выданном тексте — md
+  `<mark>…</mark>`, html `<mark class="hl">` (+ CSS), rtf — жёлтый
+  highlight, docx — выделенные run'ы (`w:highlight`). pdf/csv —
+  в следующих версиях.
+- **Команда `trident`** — инвентарь нативных FTS-индексов старой
+  базы: `SOFT\` (словники lmu.voc/lmr.voc, postings lmur.vt/lmru.vt,
+  метаданные lm*.m, графи/веса lmu.g/lmr.g/lmu.gw/lmr.gw,
+  движки lmsup.dll/lmsup32.dll) — 12 файлов с размерами; без папки
+  SOFT (база GK) — корректное «индексов нет, поиск идёт своим
+  движком экспортера». Полный Trident-движок («поиск как в
+  основном приложении») — в разработке (v0.13.0).
 - **Фильтры по реквизитам**: `--status actual|canceled|notpub|all`,
   `--issuer`, `--type`, `--date-from/--date-to`, `--title`.
 - **По номеру документа**: `--number` (в т.ч. «з № 249», «до 249»),
@@ -68,7 +83,7 @@ cargo build --release
 Тесты:
 
 ```
-cargo test --lib       # юнит-тесты движка, writers, pdf (59 тестов)
+cargo test --lib       # юнит-тесты движка, writers, pdf, highlight (71 тест)
 zakonexport-gui.exe --guitest --baza C:\Zakon.Local\Baza.GK   # GUI-самотест
 ```
 
@@ -77,12 +92,13 @@ zakonexport-gui.exe --guitest --baza C:\Zakon.Local\Baza.GK   # GUI-самоте
 ```
 zakonexport-cli search <query> [--and|--or|--phrase] [--number] [--max n] [--fields]
 zakonexport-cli export <query> [фильтры] [--format md|rtf|docx|html|csv|pdf] [--out dir]
-                       [--docs n1,n2-n5 | --pick] [--attach] [--single]
+                       [--docs n1,n2-n5 | --pick] [--attach] [--single] [--hl]
 zakonexport-cli export --docs 136974,222-225 [--format pdf] [--out dir]
 zakonexport-cli fields <docnum>      # реквизиты документа
 zakonexport-cli extract <docnum>     # полный текст документа
 zakonexport-cli signal <docnum>      # найти signal-приложение (если есть)
-zakonexport-cli print  <docnum>     # GDI-друк (системный диалог печати)
+zakonexport-cli print  <docnum> [docnum ...]  # GDI-друк (системный диалог печати; партия)
+zakonexport-cli trident                       # инвентарь нативных FTS-индексов (SOFT\)
 zakonexport-cli bulk [--format …] [--out dir] [--max n]
 zakonexport-cli stats
 zakonexport-cli about               # версия/автор
@@ -112,6 +128,7 @@ src\gui.rs         native-windows-gui UI (рабочий поток, предп�
 src\picker.rs      COM IFileDialog folder picker
 src\naming.rs      шаблоны/санитизация/дедупликация имён, run-папки
 src\fields.rs      парсер реквизитов; src\mdconv.rs, src\signal.rs, src\update.rs
+src\highlight.rs   подсветка слов запроса (Hl: terms → char-диапазоны → партиции)
 res\               иконки + inject_icon.ps1 (реинжект иконки после release)
 build\run-gui.bat  запуск GUI двойным кликом
 ```
@@ -138,6 +155,16 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.12.0** — підсвітка слів запиту в експорті (`--hl` / чекбокс
+  «підсвітити слова запиту»; md `<mark>`, html `<mark class=hl>`,
+  rtf/docx жовтий хайлайт; pdf/csv — пізніше), партійний друк
+  `print <docnum> [docnum ...]`, команда `trident` (інвентар
+  SOFT-індексів; повний Trident-рушій — у розробці), 71 юніт-тест. /
+  query-term highlighting in exports (`--hl` / GUI checkbox; md
+  `<mark>`, html `<mark class=hl>`, rtf/docx yellow highlight;
+  pdf/csv later), batch `print <docnum> [docnum ...]`, `trident`
+  command (SOFT index inventory; full Trident engine in development),
+  71 unit tests.
 - **v0.11.0** — «зв'язка» (все документы в один файл: `--single` / чекбокс
   «зв'язка (1 файл)»; md/rtf/docx/html/pdf, у PDF — `/Outlines` зміст +
   новий документ з нової сторінки), авто-вибір PDF-шрифту (кириличний

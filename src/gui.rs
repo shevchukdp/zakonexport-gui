@@ -495,6 +495,11 @@ pub struct App {
         text: "зв'язка (1 файл на всі документи)")]
     chk_bundle: nwg::CheckBox,
 
+    // mark the search query terms in the exported text (md/html/rtf/docx)
+    #[nwg_control(parent: window, size: (280, 24), position: (712, 748),
+        text: "підсвітити слова запиту")]
+    chk_hl: nwg::CheckBox,
+
     #[nwg_control(parent: window, text: "Готово")]
     status: nwg::StatusBar,
 
@@ -1047,7 +1052,11 @@ impl App {
         }
         let attach = self.chk_attach.check_state() == nwg::CheckBoxState::Checked;
         let single = self.chk_bundle.check_state() == nwg::CheckBoxState::Checked;
-        thread::spawn(move || export_worker(tx, baza, hits, format, naming, gen, attach, single));
+        let hl_on = self.chk_hl.check_state() == nwg::CheckBoxState::Checked;
+        let hl_query = self.query_edit.text();
+        thread::spawn(move || {
+            export_worker(tx, baza, hits, format, naming, gen, attach, single, hl_on, hl_query)
+        });
     }
 
     fn bases_current(&self) -> (String, PathBuf) {
@@ -1935,6 +1944,9 @@ impl App {
                             // "зв'язка" mode: all exported documents go into
                             // ONE file (bundle-2-<first>.<fmt> in the run dir)
                             self.chk_bundle.set_check_state(nwg::CheckBoxState::Checked);
+                            // v0.12.0: term highlighting — the query terms
+                            // must appear as <mark> in the exported md bundle
+                            self.chk_hl.set_check_state(nwg::CheckBoxState::Checked);
                             self.on_export_selected();
                             *self.gt_stage.borrow_mut() = 3;
                         }
@@ -1963,10 +1975,20 @@ impl App {
                                 let files = std::fs::read_dir(&out)
                                     .map(|rd| rd.filter_map(|e| e.ok()).count())
                                     .unwrap_or(0);
+                                // v0.12.0: highlight check — count the
+                                // `<mark>` spans the exported file(s) carry
+                                let mut marks = 0usize;
+                                if let Ok(rd) = std::fs::read_dir(&out) {
+                                    for e in rd.filter_map(|e| e.ok()) {
+                                        if let Ok(s) = std::fs::read_to_string(e.path()) {
+                                            marks += s.matches("<mark>").count();
+                                        }
+                                    }
+                                }
                                 let _ = std::fs::write(
                                     GUI_READY,
                                     format!(
-                                        "GUI OK rows={rows} selected={sel} exported={exported} files={files} total={total} out={out} preview_chars={chars} ptitle={title}\n"
+                                        "GUI OK rows={rows} selected={sel} exported={exported} files={files} marks={marks} total={total} out={out} preview_chars={chars} ptitle={title}\n"
                                     ),
                                 );
                                 *self.gt_stage.borrow_mut() = 5;
@@ -2063,11 +2085,18 @@ fn export_worker(
     gen: usize,
     attach: bool,
     single: bool,
+    hl_on: bool,
+    hl_query: String,
 ) {
     let progress = |done: usize, t: usize| {
         let _ = tx.send(GuiMsg::ExportProgress { gen, done, total: t });
     };
-    match writers::export_hits(&baza, &hits, &format, &naming, Some(&progress), attach, single) {
+    let hl = if hl_on {
+        crate::highlight::Hl::from_query(&hl_query)
+    } else {
+        crate::highlight::Hl::default()
+    };
+    match writers::export_hits(&baza, &hits, &format, &naming, Some(&progress), attach, single, &hl) {
         Ok((exported, attached, out)) => {
             let _ = tx.send(GuiMsg::ExportDone {
                 gen,

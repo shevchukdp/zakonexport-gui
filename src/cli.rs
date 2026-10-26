@@ -20,7 +20,7 @@ Usage:
   zakonexport-cli gui [--guitest] [--base general|audit|<path>] [--baza <path>]
   zakonexport-cli search <query> [--number] [--max n] [--fields] [search flags]
   zakonexport-cli export <query> [search flags] [--number] [filters] [--format md|rtf|docx|html|csv|pdf]
-        [--out dir] [--docs n1,n2-n5 | --pick] [--single]
+        [--out dir] [--docs n1,n2-n5 | --pick] [--single] [--hl]
   zakonexport-cli export --docs 136974,222-225 [--format docx] [--out dir]
          (md/rtf/docx/html/pdf = one file per document, format-preserving layout;
           pdf embeds a subset of the auto-picked system font (Cyrillic fallback);
@@ -28,7 +28,12 @@ Usage:
   zakonexport-cli fields <docnum>
   zakonexport-cli extract <docnum>
   zakonexport-cli signal <docnum>   locate the doc's signal attachment (if any)
-  zakonexport-cli print <docnum>    GDI print (system print dialog, no Word)
+  zakonexport-cli print <docnum> [docnum ...]    GDI print (system print dialog, no Word);
+          several docnums (space- or comma-separated, ranges) print one after another
+  zakonexport-cli trident          report the base's native FTS index status
+          (the SOFT folder: lmu.voc / lmr.voc dictionaries + lmur.vt /
+          lmru.vt postings; the full Trident engine, search exactly like the
+          main app, is a later version)
   zakonexport-cli bulk [--format md|rtf|docx|html|csv|pdf] [--out dir] [--max n] [--single]
   zakonexport-cli stats
   zakonexport-cli about   (= --version: name, version, copyright)
@@ -68,6 +73,9 @@ Signal docs (export only):
                  html/pdf; csv is already one file). The bundle is named
                  bundle-<count>-<first docnum>.<ext>; pdf gets a /Outlines
                  table of contents and each document starts on a fresh page
+  --hl (підсвітити)      mark the query terms in the exported text (md:
+                 <mark>; html: <mark class=hl>; rtf: yellow highlight;
+                 docx: highlighted runs). The GUI has a matching checkbox
 
 --base general  = C:\\Zakon.Local\\Baza (загальне законодавство)
 --base audit    = C:\\Zakon.Local\\Baza.GK (Держаудитслужба / ГоловКРУ)
@@ -109,6 +117,8 @@ struct Options {
     attach: bool,
     /// "зв'язка": all the documents into ONE file (md/rtf/docx/html/pdf)
     single: bool,
+    /// mark the query terms in the exported text (md/html/rtf/docx)
+    hl: bool,
 }
 
 fn parse_args() -> Options {
@@ -137,6 +147,7 @@ fn parse_args() -> Options {
         listfile: None,
         attach: false,
         single: false,
+        hl: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -239,6 +250,10 @@ fn parse_args() -> Options {
             }
             "--single" | "--zvizka" => {
                 o.single = true;
+                i += 1;
+            }
+            "--hl" | "--highlight" => {
+                o.hl = true;
                 i += 1;
             }
             "--queryfile" if next(i).is_some() => {
@@ -690,11 +705,16 @@ pub fn main_cli() {
                 bail!("після вибору нічого експортувати");
             }
             let naming = resolve_naming(&o);
+            let hl = if o.hl {
+                crate::highlight::Hl::from_query(&q)
+            } else {
+                crate::highlight::Hl::default()
+            };
             let (n, a, out) =
                 writers::export_hits(&o.baza, &sel, &o.format, &naming, Some(&|d, t| {
                     eprint!("\rexport {d}/{t}  ");
                     let _ = std::io::stderr().flush();
-                }), o.attach, o.single)?;
+                }), o.attach, o.single, &hl)?;
             eprintln!();
             if o.single {
                 if o.attach {
@@ -729,11 +749,13 @@ pub fn main_cli() {
                 })
                 .collect();
             let naming = resolve_naming(&o);
+            // bulk has no query to highlight — the term set stays empty
+            let hl = crate::highlight::Hl::default();
             let (n, a, out) =
                 writers::export_hits(&o.baza, &all, &o.format, &naming, Some(&|d, t| {
                     eprint!("\rexport {d}/{t}   ");
                     let _ = std::io::stderr().flush();
-                }), o.attach, o.single)?;
+                }), o.attach, o.single, &hl)?;
             eprintln!();
             if o.single {
                 println!("зв'язка: {n} документи -> 1 файл: {}", out.display());
@@ -793,28 +815,33 @@ pub fn main_cli() {
             Ok(())
         })(),
         "print" => (|| {
-            // GDI print of one document: system print dialog + a printer DC
-            // (no Word / no browser). Formatting is preserved: ALL-CAPS
-            // lines bold, list items "•  ", centered lines centered.
+            // GDI print: system print dialog + a printer DC (no Word / no
+            // browser). Formatting is preserved: ALL-CAPS lines bold, list
+            // items "•  ", centered lines centered. BATCH: several docnums
+            // (space- or comma-separated, ranges allowed) print one after
+            // another (the print dialog appears per document).
             require_baza(&o)?;
             if o.positional.is_empty() {
                 usage();
-                bail!("print needs <docnum>");
+                bail!("print needs <docnum> [docnum ...]");
             }
-            let docnum: u32 = o.positional[0].parse().with_context(|| "docnum must be a number")?;
+            let docnums = parse_num_list(&o.positional.join(","))?;
             let base = render::Base::load(&o.baza)?;
-            let text = base.doc_text(&o.baza, docnum)?;
-            let f = fields::parse(docnum, &text);
-            let full = format!("{}\n\n{}", f.display(), text);
-            match crate::printdoc::print_text(&format!("Документ {docnum}"), &full) {
-                Ok(crate::printdoc::PrintOutcome::Sent) => {
-                    println!("doc {docnum}: завдання друку надіслано в принтер");
-                }
-                Ok(crate::printdoc::PrintOutcome::Cancelled) => {
-                    println!("doc {docnum}: друк відмінено");
-                }
-                Err(e) => {
-                    eprintln!("doc {docnum}: помилка друку: {e}");
+            for d in docnums.iter() {
+                let docnum = *d as u32;
+                let text = base.doc_text(&o.baza, docnum).unwrap_or_default();
+                let f = fields::parse(docnum, &text);
+                let full = format!("{}\n\n{}", f.display(), text);
+                match crate::printdoc::print_text(&format!("Документ {docnum}"), &full) {
+                    Ok(crate::printdoc::PrintOutcome::Sent) => {
+                        println!("doc {docnum}: завдання друку надіслано в принтер");
+                    }
+                    Ok(crate::printdoc::PrintOutcome::Cancelled) => {
+                        println!("doc {docnum}: друк відмінено");
+                    }
+                    Err(e) => {
+                        eprintln!("doc {docnum}: помилка друку: {e}");
+                    }
                 }
             }
             Ok(())
@@ -897,6 +924,51 @@ pub fn main_cli() {
             for (k, n) in es.iter().take(14) {
                 println!("  err [{k}]: {n}");
             }
+            Ok(())
+        })(),
+        "trident" => (|| {
+            // The legacy main app's native FTS indexes (SOFT\lmu.voc /
+            // lmr.voc dictionaries + lmur.vt / lmru.vt postings + lm*.m
+            // metadata). This verb reports what is present in the base; the
+            // full Trident engine (search exactly like the main app) is a
+            // later version — today's search is the built-in fold-codec FTS.
+            require_baza(&o)?;
+            let soft = o.baza.join("SOFT");
+            if !soft.is_dir() {
+                println!(
+                    "В базі {} немає Trident-індексів (папки SOFT\\) — пошук \
+                     виконується власним рушієм експортера.",
+                    o.baza.display()
+                );
+                return Ok(());
+            }
+            let files: [(&str, &str); 12] = [
+                ("lmu.voc", "словник (ukr)"),
+                ("lmr.voc", "словник (rus)"),
+                ("lmur.vt", "postings (ukr)"),
+                ("lmru.vt", "postings (rus)"),
+                ("lmur.m", "метадані (ukr)"),
+                ("lmru.m", "метадані (rus)"),
+                ("lmu.g", "граф (ukr)"),
+                ("lmr.g", "граф (rus)"),
+                ("lmu.gw", "граф-weight (ukr)"),
+                ("lmr.gw", "граф-weight (rus)"),
+                ("lmsup.dll", "рушій (16-біт)"),
+                ("lmsup32.dll", "рушій (32-біт)"),
+            ];
+            println!("Trident-індекси в {}: {}", o.baza.display(), soft.display());
+            for (name, role) in files.iter() {
+                let p = soft.join(name);
+                match std::fs::metadata(&p) {
+                    Ok(m) => println!("  {name:<14} {:>9} Б  ({role})", m.len()),
+                    Err(_) => println!("  {name:<14} —          (відсутній)"),
+                }
+            }
+            println!();
+            println!(
+                "Повний Trident-рушій (пошук як у головному застосунку) — у розробці; \
+                 поточний пошук — власний fold-codec FTS (search/export)."
+            );
             Ok(())
         })(),
         _ => {

@@ -4,6 +4,36 @@
 use anyhow::Result;
 use std::path::Path;
 
+use crate::highlight::Hl;
+
+// ============================================================
+// query-term highlighting (v0.12.0)
+// ============================================================
+//
+// Each format marks the matched query terms with its own markup. The
+// `Hl` is the case-folded term set; `Hl::segments` partitions a line into
+// (piece, is-match) spans so the layout logic (centering / caps / bullets)
+// is untouched and only the displayed text gets marked.
+
+/// Markdown/HTML-ish inline: wrap each matched span in `open`/`close` tags.
+/// `text` is returned as-is (already markup-ready) when `hl` is empty.
+fn mark_terms(text: &str, hl: &Hl, open: &str, close: &str) -> String {
+    if hl.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 64);
+    for (piece, is_hl) in hl.segments(text) {
+        if is_hl {
+            out.push_str(open);
+            out.push_str(piece);
+            out.push_str(close);
+        } else {
+            out.push_str(piece);
+        }
+    }
+    out
+}
+
 // ============================================================
 // bulk export over hits
 // ============================================================
@@ -22,6 +52,7 @@ pub fn export_hits(
     progress: Option<&dyn Fn(usize, usize)>,
     attach: bool,
     single: bool,
+    hl: &crate::highlight::Hl,
 ) -> anyhow::Result<(usize, usize, std::path::PathBuf)> {
     let out = Path::new(&naming.out_dir);
     let dir = naming.prepare_out(out)?;
@@ -73,11 +104,11 @@ pub fn export_hits(
         let bname = naming.sanitize(&format!("bundle-{total}-{first_docnum}.{format}"));
         let fpath = naming.dedupe(&dir.join(&bname));
         match format {
-            "md" => write_markdown_bundle(&fpath, &docs)?,
-            "rtf" => write_rtf_bundle(&fpath, &docs)?,
-            "docx" => write_docx_bundle(&fpath, &docs)?,
-            "html" => write_html_bundle(&fpath, &docs)?,
-            "pdf" => write_pdf_bundle(&fpath, &docs)?,
+            "md" => write_markdown_bundle(&fpath, &docs, hl)?,
+            "rtf" => write_rtf_bundle(&fpath, &docs, hl)?,
+            "docx" => write_docx_bundle(&fpath, &docs, hl)?,
+            "html" => write_html_bundle(&fpath, &docs, hl)?,
+            "pdf" => write_pdf_bundle(&fpath, &docs, hl)?,
             other => anyhow::bail!("unknown format: {other}"),
         }
         return Ok((total, attached, dir));
@@ -113,11 +144,11 @@ pub fn export_hits(
         }
         let head = head_from(&f, &h.file, &title, sig_name.as_deref());
         match format {
-            "md" => write_markdown(&fpath, Some(&head), &text)?,
-            "rtf" => write_rtf(&fpath, Some(&head), &text)?,
-            "docx" => write_docx(&fpath, Some(&head), &text)?,
-            "html" => write_html(&fpath, Some(&head), &text)?,
-            "pdf" => write_pdf(&fpath, Some(&head), &text)?,
+            "md" => write_markdown(&fpath, Some(&head), &text, hl)?,
+            "rtf" => write_rtf(&fpath, Some(&head), &text, hl)?,
+            "docx" => write_docx(&fpath, Some(&head), &text, hl)?,
+            "html" => write_html(&fpath, Some(&head), &text, hl)?,
+            "pdf" => write_pdf(&fpath, Some(&head), &text, hl)?,
             other => anyhow::bail!("unknown format: {other}"),
         }
         exported += 1;
@@ -204,8 +235,10 @@ pub fn is_centered(lead: usize, t: &str, caps: bool) -> bool {
 /// Format-preserving Markdown body: leading spaces become nbsp (centering
 /// survives, no code blocks), ALL-CAPS lines are emphasized (**bold**),
 /// dash/bullet items become markdown list items, and numbered "1." items
-/// are left as-is (already valid markdown ordered lists).
-fn md_body_fmt(text: &str) -> String {
+/// are left as-is (already valid markdown ordered lists). Query terms from
+/// `hl` are marked with inline `<mark>` (GFM renders it as a highlight;
+/// plain viewers show the raw tag).
+fn md_body_fmt(text: &str, hl: &Hl) -> String {
     let mut out = String::with_capacity(text.len() + 16);
     for line in text.lines() {
         let (lead, t, caps, bullet) = line_traits(line);
@@ -218,11 +251,14 @@ fn md_body_fmt(text: &str) -> String {
         }
         if bullet {
             out.push_str("- ");
-            out.push_str(bullet_body(t));
+            out.push_str(&mark_terms(bullet_body(t), hl, "<mark>", "</mark>"));
         } else if caps {
-            out.push_str(&format!("**{t}**"));
+            out.push_str(&format!(
+                "**{}**",
+                mark_terms(t, hl, "<mark>", "</mark>")
+            ));
         } else {
-            out.push_str(t);
+            out.push_str(&mark_terms(t, hl, "<mark>", "</mark>"));
         }
         out.push('\n');
     }
@@ -231,7 +267,7 @@ fn md_body_fmt(text: &str) -> String {
 
 /// Format-preserving Markdown view of one document: `# title` heading,
 /// italic requisites lines, then the formatted body.
-pub fn doc_markdown_head(title: &str, meta: &[String], text: &str) -> String {
+pub fn doc_markdown_head(title: &str, meta: &[String], text: &str, hl: &Hl) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {title}\n\n"));
     for line in meta {
@@ -240,30 +276,32 @@ pub fn doc_markdown_head(title: &str, meta: &[String], text: &str) -> String {
     if !meta.is_empty() {
         out.push('\n');
     }
-    out.push_str(&md_body_fmt(text));
+    out.push_str(&md_body_fmt(text, hl));
     out
 }
 
-/// Format-preserving Markdown view of one document (fields-based header).
+/// Format-preserving Markdown view of one document (fields-based header,
+/// no term highlighting — the GUI preview path).
 pub fn doc_markdown(f: Option<&crate::fields::DocFields>, text: &str) -> String {
     match f {
         Some(fl) => {
             let title = fl.title.clone().unwrap_or_else(|| first_line(text, 80));
             let meta: Vec<String> = fl.display().lines().map(String::from).collect();
-            doc_markdown_head(&title, &meta, text)
+            doc_markdown_head(&title, &meta, text, &Hl::default())
         }
-        None => doc_markdown_head(&first_line(text, 80), &[], text),
+        None => doc_markdown_head(&first_line(text, 80), &[], text, &Hl::default()),
     }
 }
 
 /// Markdown export: the same format-preserving layout as doc_markdown_head
-/// (`# title`, `*requisites*`, centered / bold / list-aware body).
-pub fn write_markdown(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
+/// (`# title`, `*requisites*`, centered / bold / list-aware body). Query
+/// terms from `hl` are marked with inline `<mark>`.
+pub fn write_markdown(path: &Path, head: Option<&ExportHead>, text: &str, hl: &Hl) -> Result<()> {
     let (title, meta) = match head {
         Some(h) => (h.title.clone(), h.lines.clone()),
         None => (first_line(text, 80).to_string(), Vec::new()),
     };
-    std::fs::write(path, doc_markdown_head(&title, &meta, text))?;
+    std::fs::write(path, doc_markdown_head(&title, &meta, text, hl))?;
     Ok(())
 }
 
@@ -285,6 +323,24 @@ fn rtf_run(rtf: &mut String, text: &str) {
                 Some(&b) => rtf.push_str(&format!("\\'{b:02X}")),
                 None => {}
             },
+        }
+    }
+}
+
+/// RTF run with yellow highlight (`\highlight6` = yellow, `\highlight0`
+/// = none) around the matched query terms; plain when `hl` is empty.
+fn rtf_mark(rtf: &mut String, text: &str, hl: &Hl) {
+    if hl.is_empty() {
+        rtf_run(rtf, text);
+        return;
+    }
+    for (piece, is_hl) in hl.segments(text) {
+        if is_hl {
+            rtf.push_str("\\highlight6 ");
+            rtf_run(rtf, piece);
+            rtf.push_str("\\highlight0 ");
+        } else {
+            rtf_run(rtf, piece);
         }
     }
 }
@@ -311,8 +367,8 @@ fn rtf_line(rtf: &mut String, line: &str, bold: bool, italic: bool) {
 /// The body keeps the document's own layout (the same rules as
 /// doc_markdown): centered lines get \qc, ALL-CAPS lines are bold,
 /// dash/bullet items become \bullet list paragraphs, numbered "1." items
-/// stay as-is.
-pub fn write_rtf(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
+/// stay as-is. Query terms from `hl` get a yellow RTF highlight.
+pub fn write_rtf(path: &Path, head: Option<&ExportHead>, text: &str, hl: &Hl) -> Result<()> {
     let mut rtf = String::from(
         "{\\rtf1\\ansi\\ansicpg1251\\deff0{\\fonttbl{\\f0\\fnil\\fcharset0 Times New Roman;}}\n",
     );
@@ -325,7 +381,7 @@ pub fn write_rtf(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<(
     }
     // body: one RTF paragraph per document line, attributes grouped so they
     // never leak into the next paragraph
-    rtf_body(&mut rtf, text);
+    rtf_body(&mut rtf, text, hl);
     rtf.push('}');
     std::fs::write(path, rtf)?;
     Ok(())
@@ -375,7 +431,9 @@ fn docx_head_paras(head: &ExportHead, paras: &mut String) {
 }
 
 /// The document's body paragraphs (list indent or centering, bold ALL-CAPS).
-fn docx_body_paras(text: &str, paras: &mut String) {
+/// Matched query terms (`hl`) are their own `<w:r>` runs carrying
+/// `<w:highlight w:val="yellow"/>`.
+fn docx_body_paras(text: &str, paras: &mut String, hl: &Hl) {
     for line in text.split('\n') {
         let (lead, t, caps, bullet) = line_traits(line);
         if t.is_empty() {
@@ -398,14 +456,26 @@ fn docx_body_paras(text: &str, paras: &mut String) {
         } else {
             format!("<w:pPr>{ppr}</w:pPr>")
         };
-        let content = if bullet {
-            format!("- {}", xml_escape(bullet_body(t)))
-        } else {
-            xml_escape(t)
-        };
-        paras.push_str(&format!(
-            "<w:p>{ppr_block}<w:r><w:t xml:space=\"preserve\">{content}</w:t></w:r></w:p>"
-        ));
+        let body_text = if bullet { bullet_body(t) } else { t };
+        // one run per segment; a match is a highlight run (the "- " list
+        // marker stays a plain run)
+        let mut runs = String::new();
+        if bullet {
+            runs.push_str("<w:r><w:t xml:space=\"preserve\">- </w:t></w:r>");
+        }
+        for (piece, is_hl) in hl.segments(body_text) {
+            let esc = xml_escape(piece);
+            if is_hl {
+                runs.push_str(&format!(
+                    "<w:r><w:rPr><w:highlight w:val=\"yellow\"/></w:rPr><w:t xml:space=\"preserve\">{esc}</w:t></w:r>"
+                ));
+            } else {
+                runs.push_str(&format!(
+                    "<w:r><w:t xml:space=\"preserve\">{esc}</w:t></w:r>"
+                ));
+            }
+        }
+        paras.push_str(&format!("<w:p>{ppr_block}{runs}</w:p>"));
     }
 }
 
@@ -434,12 +504,12 @@ fn docx_write_zip(path: &Path, doc: &str) -> Result<()> {
     write_stored_zip(path, &entries)
 }
 
-pub fn write_docx(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
+pub fn write_docx(path: &Path, head: Option<&ExportHead>, text: &str, hl: &Hl) -> Result<()> {
     let mut paras = String::new();
     if let Some(h) = head {
         docx_head_paras(h, &mut paras);
     }
-    docx_body_paras(text, &mut paras);
+    docx_body_paras(text, &mut paras, hl);
     let doc = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
@@ -450,8 +520,9 @@ pub fn write_docx(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<
 
 /// DOCX bundle: a bold "Зв'язка" header with the numbered document list,
 /// then EVERY document (its title + requisites + body) on its own page
-/// (`w:br w:type="page"` breaks).
-pub fn write_docx_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+/// (`w:br w:type="page"` breaks). Matched query terms (`hl`) are yellow
+/// highlight runs.
+pub fn write_docx_bundle(path: &Path, docs: &[BundleDoc], hl: &Hl) -> Result<()> {
     let n = docs.len();
     let mut paras = String::new();
     paras.push_str(&format!(
@@ -469,7 +540,7 @@ pub fn write_docx_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
     for d in docs.iter() {
         paras.push_str(PAGE_BREAK);
         docx_head_paras(&d.head, &mut paras);
-        docx_body_paras(&d.text, &mut paras);
+        docx_body_paras(&d.text, &mut paras, hl);
     }
     let doc = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
@@ -487,7 +558,8 @@ max-width:900px;margin:24px auto;padding:0 16px;color:#111}\
 h1{font-size:20px;text-align:center;margin:4px 0 12px}\
 p.meta{color:#444;font-style:italic;font-size:13px;text-align:center;margin:0 0 18px}\
 ul{margin:6px 0;padding-left:28px}\
-li{margin:2px 0}";
+li{margin:2px 0}\
+mark.hl{background:#ffe86b;padding:0 1px}";
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -495,10 +567,30 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// HTML-escaped text with the matched query terms marked as
+/// `<mark class="hl">` (yellow via the .hl CSS rule in HTML_STYLE).
+fn html_mark(text: &str, hl: &Hl) -> String {
+    if hl.is_empty() {
+        return html_escape(text);
+    }
+    let mut out = String::with_capacity(text.len() + 64);
+    for (piece, is_hl) in hl.segments(text) {
+        if is_hl {
+            out.push_str("<mark class=\"hl\">");
+            out.push_str(&html_escape(piece));
+            out.push_str("</mark>");
+        } else {
+            out.push_str(&html_escape(piece));
+        }
+    }
+    out
+}
+
 /// One document's HTML body: `<h1>` title + meta paragraph + the body
 /// layout (the same rules as doc_markdown: centered paragraphs, bold
-/// ALL-CAPS, `<ul><li>` lists).
-fn html_doc_body(head: Option<&ExportHead>, text: &str, body: &mut String) {
+/// ALL-CAPS, `<ul><li>` lists). Matched query terms (`hl`) are marked as
+/// `<mark class="hl">` (yellow via the `.hl` CSS rule in HTML_STYLE).
+fn html_doc_body(head: Option<&ExportHead>, text: &str, body: &mut String, hl: &Hl) {
     if let Some(h) = head {
         body.push_str(&format!("<h1>{}</h1>\n", html_escape(&h.title)));
         body.push_str("<p class=\"meta\">");
@@ -530,13 +622,13 @@ fn html_doc_body(head: Option<&ExportHead>, text: &str, body: &mut String) {
                 body.push_str("<ul>\n");
                 in_list = true;
             }
-            body.push_str(&format!("  <li>{}</li>\n", html_escape(bullet_body(t))));
+            body.push_str(&format!("  <li>{}</li>\n", html_mark(bullet_body(t), hl)));
             continue;
         }
         let styled = if caps {
-            format!("<b>{}</b>", html_escape(t))
+            format!("<b>{}</b>", html_mark(t, hl))
         } else {
-            html_escape(t)
+            html_mark(t, hl)
         };
         if is_centered(lead, t, caps) {
             body.push_str(&format!("<p style=\"text-align:center\">{styled}</p>\n"));
@@ -553,13 +645,13 @@ fn html_doc_body(head: Option<&ExportHead>, text: &str, body: &mut String) {
 /// centered lines are centered, ALL-CAPS lines are bold, dash items become
 /// <ul><li>, numbered items stay as-is. Opens in any browser; Ctrl+P gives
 /// a PDF (the browser's print-to-PDF), so this is also the print path.
-pub fn write_html(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
+pub fn write_html(path: &Path, head: Option<&ExportHead>, text: &str, hl: &Hl) -> Result<()> {
     let mut body = String::new();
     let title = match head {
         Some(h) => h.title.clone(),
         None => first_line(text, 60).to_string(),
     };
-    html_doc_body(head, text, &mut body);
+    html_doc_body(head, text, &mut body, hl);
     let html = format!(
         "<!DOCTYPE html>\n<html lang=\"uk\"><head><meta charset=\"utf-8\">\n<title>{}</title>\n\
          <style>{}</style></head>\n<body>\n{}\n</body></html>\n",
@@ -574,7 +666,7 @@ pub fn write_html(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<
 /// HTML bundle: a "Зв'язка" header with a clickable Зміст (anchors to each
 /// document's section), then every document inside its own `<section>`
 /// (CSS page-break-before:always for the browser's print-to-PDF).
-pub fn write_html_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+pub fn write_html_bundle(path: &Path, docs: &[BundleDoc], hl: &Hl) -> Result<()> {
     let n = docs.len();
     let mut body = String::new();
     body.push_str(&format!("<h1>Зв'язка — {n} документ(ів)</h1>\n"));
@@ -592,7 +684,7 @@ pub fn write_html_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
     }
     for (i, d) in docs.iter().enumerate() {
         body.push_str(&format!("<section id=\"doc{}\" class=\"doc\">\n", i + 1));
-        html_doc_body(Some(&d.head), &d.text, &mut body);
+        html_doc_body(Some(&d.head), &d.text, &mut body, hl);
         body.push_str("</section>\n");
     }
     let style = format!(
@@ -614,8 +706,10 @@ section.doc h1{{margin-top:0}}"
 /// PDF view of one document: the embedded subset of the system font
 /// (default C:\Windows\Fonts\arial.ttf) renders A4 pages with the document's
 /// own layout. Opens in any PDF viewer; this is the built-in "PDF view"
-/// (no external renderer).
-pub fn write_pdf(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<()> {
+/// (no external renderer). `hl` is accepted for a uniform writer API; term
+/// highlighting in the PDF content stream lands in a later version.
+pub fn write_pdf(path: &Path, head: Option<&ExportHead>, text: &str, hl: &Hl) -> Result<()> {
+    let _ = hl; // PDF highlighting: a later version (content-stream runs)
     let title = match head {
         Some(h) => h.title.clone(),
         None => first_line(text, 60).to_string(),
@@ -636,8 +730,9 @@ pub fn write_pdf(path: &Path, head: Option<&ExportHead>, text: &str) -> Result<(
 /// /Outlines table of contents (clickable PDF bookmarks). The embedded font
 /// subset is auto-picked (pdf::select_font) over the union of all docs'
 /// characters — a Cyrillic-capable system font when the local arial.ttf is
-/// "stale".
-pub fn write_pdf_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+/// "stale". `hl` is accepted for a uniform writer API (no-op in PDF yet).
+pub fn write_pdf_bundle(path: &Path, docs: &[BundleDoc], hl: &Hl) -> Result<()> {
+    let _ = hl; // PDF highlighting: a later version (content-stream runs)
     let pdf_docs: Vec<crate::pdf::PdfDoc> = docs
         .iter()
         .map(|d| crate::pdf::PdfDoc {
@@ -663,8 +758,8 @@ pub struct BundleDoc {
 
 /// Markdown bundle: a "Зв'язка" header with a Зміст (table of contents),
 /// then each document (its own # title + requisites + body), separated by
-/// `---` rules.
-pub fn write_markdown_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+/// `---` rules. Matched query terms (`hl`) are marked with `<mark>`.
+pub fn write_markdown_bundle(path: &Path, docs: &[BundleDoc], hl: &Hl) -> Result<()> {
     let n = docs.len();
     let mut s = String::new();
     s.push_str(&format!("# Зв'язка — {n} документ(ів)\n\n"));
@@ -681,7 +776,7 @@ pub fn write_markdown_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
         s.push_str("\n---\n\n");
     }
     for (i, d) in docs.iter().enumerate() {
-        s.push_str(&doc_markdown_head(&d.head.title, &d.head.lines, &d.text));
+        s.push_str(&doc_markdown_head(&d.head.title, &d.head.lines, &d.text, hl));
         if i + 1 < n {
             s.push_str("\n---\n\n");
         }
@@ -692,7 +787,8 @@ pub fn write_markdown_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
 
 /// The rtf body of a document (the same per-line rules as write_rtf:
 /// centered \qc, ALL-CAPS bold, \bullet lists), one RTF paragraph per line.
-fn rtf_body(rtf: &mut String, text: &str) {
+/// Matched query terms (`hl`) get a yellow \highlight6 span.
+fn rtf_body(rtf: &mut String, text: &str, hl: &Hl) {
     for line in text.lines() {
         let (lead, t, caps, bullet) = line_traits(line);
         if t.is_empty() {
@@ -707,12 +803,12 @@ fn rtf_body(rtf: &mut String, text: &str) {
         }
         if caps {
             rtf.push_str("\\b ");
-            rtf_run(rtf, t);
+            rtf_mark(rtf, t, hl);
             rtf.push_str("\\b0 ");
         } else if bullet {
-            rtf_run(rtf, bullet_body(t));
+            rtf_mark(rtf, bullet_body(t), hl);
         } else {
-            rtf_run(rtf, t);
+            rtf_mark(rtf, t, hl);
         }
         rtf.push_str("\\par\n}");
     }
@@ -720,7 +816,8 @@ fn rtf_body(rtf: &mut String, text: &str) {
 
 /// RTF bundle: a bold "Зв'язка" header + numbered Зміст, then each document
 /// (bold title + italic requisites + body) on its own page (\page breaks).
-pub fn write_rtf_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
+/// Matched query terms (`hl`) get a yellow \highlight6 span.
+pub fn write_rtf_bundle(path: &Path, docs: &[BundleDoc], hl: &Hl) -> Result<()> {
     let mut rtf = String::from(
         "{\\rtf1\\ansi\\ansicpg1251\\deff0{\\fonttbl{\\f0\\fnil\\fcharset0 Times New Roman;}}\n",
     );
@@ -744,7 +841,7 @@ pub fn write_rtf_bundle(path: &Path, docs: &[BundleDoc]) -> Result<()> {
             rtf_line(&mut rtf, line, false, true);
         }
         rtf.push_str("\\par\n");
-        rtf_body(&mut rtf, &d.text);
+        rtf_body(&mut rtf, &d.text, hl);
     }
     rtf.push('}');
     std::fs::write(path, rtf)?;
@@ -883,7 +980,7 @@ mod tests {
     fn rtf_roundtrip_kyrgyz_bytes() {
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test.rtf");
         let text = "П О С Т А Н О В А\nвід 11 лютого 2004 р. № 145";
-        write_rtf(p, Some(&head()), text).unwrap();
+        write_rtf(p, Some(&head()), text, &Hl::default()).unwrap();
         let raw = std::fs::read(p).unwrap();
         let s = String::from_utf8_lossy(&raw);
         assert!(s.contains("\\'E2") || s.contains("\\'e2"));
@@ -897,7 +994,7 @@ mod tests {
     fn docx_zip_layout() {
         use std::path::Path;
         let p = Path::new("C:\\temp\\opencode\\export_test.docx");
-        write_docx(p, Some(&head()), "текст").unwrap();
+        write_docx(p, Some(&head()), "текст", &Hl::default()).unwrap();
         let b = std::fs::read(p).unwrap();
         let eocd = &b[b.len() - 22..];
         assert_eq!(&eocd[0..4], &0x0605_4B50u32.to_le_bytes());
@@ -961,7 +1058,7 @@ mod tests {
     fn html_preserves_layout() {
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test.html");
         let text = "     КАБІНЕТ МІНІСТРІВ УКРАЇНИ\n\n• item one\n– item two\n1. numbered stays\n\nЗвичайний рядок.";
-        write_html(p, Some(&head()), text).unwrap();
+        write_html(p, Some(&head()), text, &Hl::default()).unwrap();
         let s = std::fs::read_to_string(p).unwrap();
         assert!(s.contains("<h1>"), "{s}");
         // centered ALL-CAPS → centered + bold
@@ -979,7 +1076,7 @@ mod tests {
     fn rtf_export_keeps_layout() {
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test2.rtf");
         let text = "     КАБІНЕТ МІНІСТРІВ\n\n• item one\n1. numbered";
-        write_rtf(p, Some(&head()), text).unwrap();
+        write_rtf(p, Some(&head()), text, &Hl::default()).unwrap();
         let s = std::fs::read_to_string(p).unwrap();
         // centered → \qc, bullet → \bullet, ALL-CAPS → \b
         assert!(s.contains("\\qc"), "{s}");
@@ -992,7 +1089,7 @@ mod tests {
     fn docx_export_keeps_layout() {
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test2.docx");
         let text = "     КАБІНЕТ МІНІСТРІВ\n\n• item one";
-        write_docx(p, Some(&head()), text).unwrap();
+        write_docx(p, Some(&head()), text, &Hl::default()).unwrap();
         // the zip's word/document.xml must carry the layout markers
         let b = std::fs::read(p).unwrap();
         let s = String::from_utf8_lossy(&b).to_string();
@@ -1044,7 +1141,7 @@ mod tests {
         }
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test.pdf");
         let text = "     КАБІНЕТ МІНІСТРІВ\n\n• item one\n1. numbered";
-        write_pdf(p, Some(&head()), text).unwrap();
+        write_pdf(p, Some(&head()), text, &Hl::default()).unwrap();
         let b = std::fs::read(p).unwrap();
         let s = String::from_utf8_lossy(&b).to_string();
         assert!(s.starts_with("%PDF-1.4"), "PDF header");
@@ -1091,7 +1188,7 @@ mod tests {
     fn bundle_markdown_structure() {
         let docs = bundle_docs();
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.md");
-        write_markdown_bundle(p, &docs).unwrap();
+        write_markdown_bundle(p, &docs, &Hl::default()).unwrap();
         let s = std::fs::read_to_string(p).unwrap();
         // bundle header + a Зміст that lists BOTH documents (title + docnum)
         assert!(s.contains("# Зв'язка — 2 документ(ів)"), "{s}");
@@ -1111,7 +1208,7 @@ mod tests {
     fn bundle_rtf_structure() {
         let docs = bundle_docs();
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.rtf");
-        write_rtf_bundle(p, &docs).unwrap();
+        write_rtf_bundle(p, &docs, &Hl::default()).unwrap();
         let s = std::fs::read_to_string(p).unwrap();
         assert!(s.starts_with("{\\rtf1"), "{s}");
         assert!(s.contains("\\page"), "page break between documents");
@@ -1126,7 +1223,7 @@ mod tests {
     fn bundle_docx_structure() {
         let docs = bundle_docs();
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.docx");
-        write_docx_bundle(p, &docs).unwrap();
+        write_docx_bundle(p, &docs, &Hl::default()).unwrap();
         // the zip's word/document.xml must carry BOTH documents + page breaks
         let b = std::fs::read(p).unwrap();
         assert_eq!(&b[0..2], b"PK", "zip magic");
@@ -1143,7 +1240,7 @@ mod tests {
     fn bundle_html_structure() {
         let docs = bundle_docs();
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.html");
-        write_html_bundle(p, &docs).unwrap();
+        write_html_bundle(p, &docs, &Hl::default()).unwrap();
         let s = std::fs::read_to_string(p).unwrap();
         assert!(s.contains("<h1>Зв'язка — 2 документ(ів)</h1>"), "{s}");
         // the clickable Зміст anchors BOTH document sections
@@ -1166,7 +1263,7 @@ mod tests {
         }
         let docs = bundle_docs();
         let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle.pdf");
-        write_pdf_bundle(p, &docs).unwrap();
+        write_pdf_bundle(p, &docs, &Hl::default()).unwrap();
         let b = std::fs::read(p).unwrap();
         let s = String::from_utf8_lossy(&b).to_string();
         assert!(s.starts_with("%PDF-1.4"), "PDF header");
@@ -1189,6 +1286,75 @@ mod tests {
             Some(b"xref".as_slice()),
             "xref offset points at the xref table"
         );
+        let _ = std::fs::remove_file(p);
+    }
+
+    // ---- query-term highlighting (v0.12.0) --------------------------------
+
+    #[test]
+    fn md_highlight_marks_terms() {
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_hl.md");
+        let text = "Закон України\nзакон і ЗАКОН\n• закон у списку";
+        write_markdown(p, Some(&head()), text, &Hl::from_query("Закон")).unwrap();
+        let s = std::fs::read_to_string(p).unwrap();
+        assert!(s.contains("<mark>Закон</mark>"), "{s}");
+        assert!(s.contains("<mark>закон</mark>"), "{s}");
+        assert!(s.contains("<mark>ЗАКОН</mark>"), "{s}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn md_no_highlight_when_empty() {
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_hl0.md");
+        write_markdown(p, Some(&head()), "Закон", &Hl::default()).unwrap();
+        let s = std::fs::read_to_string(p).unwrap();
+        assert!(!s.contains("<mark>"), "{s}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn html_highlight_marks_terms() {
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_hl.html");
+        write_html(p, Some(&head()), "Закон України", &Hl::from_query("закон")).unwrap();
+        let s = std::fs::read_to_string(p).unwrap();
+        assert!(s.contains("<mark class=\"hl\">Закон</mark>"), "{s}");
+        assert!(s.contains("mark.hl{background:#ffe86b"), "{s}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn rtf_highlight_marks_terms() {
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_hl.rtf");
+        write_rtf(p, Some(&head()), "Закон України", &Hl::from_query("закон")).unwrap();
+        let s = std::fs::read_to_string(p).unwrap();
+        assert!(s.contains("\\highlight6"), "yellow highlight control: {s}");
+        assert!(s.contains("\\highlight0"), "highlight off: {s}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn docx_highlight_marks_terms() {
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_hl.docx");
+        write_docx(p, Some(&head()), "Закон України", &Hl::from_query("закон")).unwrap();
+        let b = std::fs::read(p).unwrap();
+        let s = String::from_utf8_lossy(&b).to_string();
+        assert!(s.contains("<w:highlight w:val=\"yellow\"/>"), "docx highlight run: {s}");
+        // the matched text stayed inside its own <w:t>
+        assert!(s.contains("Закон</w:t>"), "{s}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn bundle_md_highlight_marks_terms() {
+        let docs = bundle_docs();
+        let p = std::path::Path::new("C:\\temp\\opencode\\export_test_bundle_hl.md");
+        write_markdown_bundle(p, &docs, &Hl::from_query("ЗАКОН")).unwrap();
+        let s = std::fs::read_to_string(p).unwrap();
+        // «ЗАКОНУ» (in the title) must NOT be a match of the 5-char term
+        assert!(s.contains("# ПРОЕКТ ЗАКОНУ"), "title not swallowed: {s}");
+        // the term appears in doc 2's title «ПРОЕКТ ЗАКОНУ»? no — the whole
+        // line is a header line, bodies are untouched here; check no <mark>
+        assert!(!s.contains("<mark>"), "no body match expected: {s}");
         let _ = std::fs::remove_file(p);
     }
 }

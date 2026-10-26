@@ -16,6 +16,92 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.13.0 — 2026-10-26
+
+### UK
+- **Trident: експериментальний нативний рушій** (`src/trident.rs`) —
+  декод частин нативного FTS-індексу старого застосунку в папці
+  `SOFT\` бази:
+  - `windows.kod` (683 Б): кодова таблиця, 80 рядків
+    `<2hex-code> <sep> <byte>` — значення ≥0x80 записано сирийм
+    байтом, <0x80 — двома ASCII-hex цифрами; сепаратори `=`
+    (мапінг) і `>` (fold);
+  - `lm.a` (904 Б): case-fold таблиці, текстові секції `E:`
+    (Latin identity A…Z), `G:` (міжмовні якорі: A↔84/a4,
+    O↔96/e6, U↔9c/ec, Щ↔9f/ef), `R:`/`U:` — по 32 fold-пари
+    (в U головний діапазон пропускає 9a/9b/9d, додаткові пари
+    f4f5/f6f7/f8f9);
+  - записи словника `[0x84][word][00 00]` (lmu.voc — 78 записів)
+    і u16 posting-потік `.vt` (419540 u16, ідентифікатори
+    документів 0..65535 — native IDs 2005-індексу).
+- **`tsearch <query>`** (CLI, експеримент): терміни запиту
+  кодуються через LmCode-таблицю знаків (підтверджені якорі
+  А/О/У/Щ + цифри + Latin; с/і — виведені за частотою у
+  словнику, підтвердження — v0.14.0), збігаються зі словником
+  lmu.voc (префікси + стем-обрізки 1–3 хвостики), postings
+  читаються з lmur.vt. Результат — native Trident-ідентифікатори
+  документів + покриття (% закодованих знаків запиту). Зв'язка
+  native-ID з номерами документів поточної бази — v0.14.0
+  (разом з морфологією .g/.gw і точними word→postings кордонами).
+- **Команда `trident` розширена** — інвентар 16 файлів (додано
+  windows.kod, lm.a, lmu.use, lmr.use до попередніх 12) +
+  декодована статистика: число kod-кодів, R/U fold-пари,
+  записи словника, vt-потік (min..max ідентифікаторів).
+- **GUI**: чекбокс «Trident-рушій (нативний індекс,
+  експеримент)» — за позначення пошук йде через нативний індекс
+  (SOFT\); рядки показують native IDs (стовпець файлу
+  «trident (native id)», реквізитні стовпці — даші, доки не
+  зроблена зв'язка номерів); без SOFT\-індексу — повідомлення в
+  статус-барі. Чекбокс вимкнено за замовчуванням → звичайний
+  пошук, guitest незмінний.
+- Версія **0.12.0 → 0.13.0** (єдине джерело: `CARGO_PKG_VERSION`).
+- 82 юніт-тести (нові: `trident::tests` ×11 — kod, fold,
+  розділи lm.a, таблиця знаків, покриття, словник, vt,
+  префіксний пошук + інтеграційний на реальному індексі).
+
+### EN
+- **Trident: experimental native engine** (`src/trident.rs`) —
+  decodes parts of the legacy app's native FTS index in the base's
+  `SOFT\` folder:
+  - `windows.kod` (683 B): the code table, 80 lines
+    `<2hex-code> <sep> <byte>` — values ≥0x80 stored as a raw
+    byte, <0x80 as two ASCII-hex digits; separators `=`
+    (mapping) and `>` (fold);
+  - `lm.a` (904 B): case-fold tables, text sections `E:` (Latin
+    identity A…Z), `G:` (cross-language anchors: A↔84/a4,
+    O↔96/e6, U↔9c/ec, Щ↔9f/ef), `R:`/`U:` — 32 fold pairs each
+    (U skips 9a/9b/9d in the main range; extra pairs
+    f4f5/f6f7/f8f9);
+  - dictionary records `[0x84][word][00 00]` (lmu.voc — 78
+    records) and the u16 posting stream from `.vt` (419540 u16,
+    doc ids 0..65535 — native ids of the 2005-era index).
+- **`tsearch <query>`** (CLI, experimental): query terms are
+  encoded through the LmCode character table (confirmed anchors
+  A/O/U/Щ + digits + Latin; С/І inferred from dictionary
+  frequency, to be confirmed in v0.14.0), matched against the
+  lmu.voc dictionary (prefix + stem trimming, 1–3 tails),
+  postings are read from lmur.vt. The result is native Trident
+  document ids plus a coverage % of encodable query characters.
+  Joining the native ids to the current base's docnums — v0.14.0
+  (with the .g/.gw morphology and the exact word→postings
+  boundaries).
+- **Extended `trident` verb** — a 16-file inventory (added
+  windows.kod, lm.a, lmu.use, lmr.use to the previous 12) +
+  decoded stats: kod codes, R/U fold pairs, dictionary records,
+  vt stream (min..max doc ids).
+- **GUI**: a "Trident-рушій (нативний індекс, експеримент)"
+  checkbox — when checked, search runs through the native index
+  (SOFT\); rows show the native ids (file column
+  "trident (native id)", field columns dashed until the docnum
+  join lands); without a SOFT\ index — a status-bar message.
+  Unchecked by default → the classic search, guitest unchanged.
+- Version **0.12.0 → 0.13.0** (single source: `CARGO_PKG_VERSION`).
+- 82 unit tests (new: `trident::tests` ×11 — kod, fold, lm.a
+  sections, the char table, coverage, dict, vt, prefix search +
+  a real-index integration test).
+
+---
+
 ## v0.12.0 — 2026-10-26
 
 ### UK

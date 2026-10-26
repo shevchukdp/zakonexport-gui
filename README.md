@@ -49,10 +49,23 @@
 - **Команда `trident`** — инвентарь нативных FTS-индексов старой
   базы: `SOFT\` (словники lmu.voc/lmr.voc, postings lmur.vt/lmru.vt,
   метаданные lm*.m, графи/веса lmu.g/lmr.g/lmu.gw/lmr.gw,
-  движки lmsup.dll/lmsup32.dll) — 12 файлов с размерами; без папки
-  SOFT (база GK) — корректное «индексов нет, поиск идёт своим
-  движком экспортера». Полный Trident-движок («поиск как в
-  основном приложении») — в разработке (v0.13.0).
+  движки lmsup.dll/lmsup32.dll, кодовая таблица windows.kod,
+  fold-таблицы lm.a, usage-прапорцы lmu.use/lmr.use) — 16
+  файлов с размерами + декодованная статистика (kod-коды, R/U
+  fold-пары, записи словника, vt-поток); без папки SOFT (база
+  GK) — корректное «индексов нет, поиск идёт своим движком
+  экспортера».
+- **`tsearch <query>` — экспериментальный Trident-движок**
+  (нативный индекс, `src/trident.rs`): запрос кодируется через
+  LmCode-таблицу (подтверждённые якоря А/О/У/Щ + цифры + Latin;
+  с/і — кандидаты по частоте, подтверждение в v0.14.0),
+  сопоставляется со словарём lmu.voc (префиксы + стем-обрезки),
+  postings читаются из lmur.vt → native Trident-ID документов
+  (2005-индекс; связь с номерами текущей базы + морфология
+  .g/.gw — v0.14.0). В GUI — чекбокс «Trident-рушій (нативний
+  індекс, експеримент)»: при отмеченном флаге поиск идёт через
+  нативный индекс (строки = native IDs, реквизитные столбцы —
+  даше); выключен по умолчанию.
 - **Фильтры по реквизитам**: `--status actual|canceled|notpub|all`,
   `--issuer`, `--type`, `--date-from/--date-to`, `--title`.
 - **По номеру документа**: `--number` (в т.ч. «з № 249», «до 249»),
@@ -83,7 +96,7 @@ cargo build --release
 Тесты:
 
 ```
-cargo test --lib       # юнит-тесты движка, writers, pdf, highlight (71 тест)
+cargo test --lib       # юнит-тесты движка, writers, pdf, highlight, trident (82 теста)
 zakonexport-gui.exe --guitest --baza C:\Zakon.Local\Baza.GK   # GUI-самотест
 ```
 
@@ -99,6 +112,7 @@ zakonexport-cli extract <docnum>     # полный текст документ�
 zakonexport-cli signal <docnum>      # найти signal-приложение (если есть)
 zakonexport-cli print  <docnum> [docnum ...]  # GDI-друк (системный диалог печати; партия)
 zakonexport-cli trident                       # инвентарь нативных FTS-индексов (SOFT\)
+zakonexport-cli tsearch <query>               # эксперимент: поиск по нативному Trident-индексу
 zakonexport-cli bulk [--format …] [--out dir] [--max n]
 zakonexport-cli stats
 zakonexport-cli about               # версия/автор
@@ -129,6 +143,7 @@ src\picker.rs      COM IFileDialog folder picker
 src\naming.rs      шаблоны/санитизация/дедупликация имён, run-папки
 src\fields.rs      парсер реквизитов; src\mdconv.rs, src\signal.rs, src\update.rs
 src\highlight.rs   подсветка слов запроса (Hl: terms → char-диапазоны → партиции)
+src\trident.rs     экспериментальный Trident-движок: kod/lm.a/словник/vt (SOFT\)
 res\               иконки + inject_icon.ps1 (реинжект иконки после release)
 build\run-gui.bat  запуск GUI двойным кликом
 ```
@@ -155,6 +170,21 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.13.0** — Trident: експериментальний нативний рушій
+  (`src/trident.rs`: декод windows.kod, lm.a, записів словника
+  lmu.voc і u16 posting-потіку .vt), CLI `tsearch <query>`
+  (нативні Trident-ID документів + покриття знаків), розширена
+  команда `trident` (16 файлів + статистика), GUI-чекбокс
+  «Trident-рушій»; повне покриття знаків, морфологія .g/.gw і
+  зв'язка native-ID → номери поточної бази — v0.14.0, 82
+  юніт-тести. / Trident: experimental native engine
+  (`src/trident.rs`: windows.kod, lm.a, lmu.voc dictionary
+  records and the u16 posting stream decoded), CLI
+  `tsearch <query>` (native Trident doc ids + char coverage),
+  extended `trident` verb (16 files + stats), a GUI
+  "Trident-рушій" checkbox; full char coverage, .g/.gw
+  morphology and the native-ID → current docnums join —
+  v0.14.0, 82 unit tests.
 - **v0.12.0** — підсвітка слів запиту в експорті (`--hl` / чекбокс
   «підсвітити слова запиту»; md `<mark>`, html `<mark class=hl>`,
   rtf/docx жовтий хайлайт; pdf/csv — пізніше), партійний друк

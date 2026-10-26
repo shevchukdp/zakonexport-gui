@@ -31,9 +31,13 @@ Usage:
   zakonexport-cli print <docnum> [docnum ...]    GDI print (system print dialog, no Word);
           several docnums (space- or comma-separated, ranges) print one after another
   zakonexport-cli trident          report the base's native FTS index status
-          (the SOFT folder: lmu.voc / lmr.voc dictionaries + lmur.vt /
-          lmru.vt postings; the full Trident engine, search exactly like the
-          main app, is a later version)
+          (SOFT\\ inventory — 16 files incl. windows.kod + lm.a, plus the
+          decoded parts: kod codes, fold pairs, dict records, vt stream;
+          search via tsearch — experimental)
+  zakonexport-cli tsearch <query>  experimental: search the base's native
+          Trident index (SOFT\\lmu.voc + lmur.vt) — the legacy main app's
+          engine. The document numbers are the native 2005-era Trident ids
+          (the join to the current base docnums is in development)
   zakonexport-cli bulk [--format md|rtf|docx|html|csv|pdf] [--out dir] [--max n] [--single]
   zakonexport-cli stats
   zakonexport-cli about   (= --version: name, version, copyright)
@@ -927,11 +931,10 @@ pub fn main_cli() {
             Ok(())
         })(),
         "trident" => (|| {
-            // The legacy main app's native FTS indexes (SOFT\lmu.voc /
-            // lmr.voc dictionaries + lmur.vt / lmru.vt postings + lm*.m
-            // metadata). This verb reports what is present in the base; the
-            // full Trident engine (search exactly like the main app) is a
-            // later version — today's search is the built-in fold-codec FTS.
+            // The legacy main app's native FTS indexes (SOFT\): the 16-file
+            // inventory plus the parts decoded today — the windows.kod code
+            // table, the lm.a case-fold tables, the dictionary records and
+            // the u16 posting stream (src/trident.rs).
             require_baza(&o)?;
             let soft = o.baza.join("SOFT");
             if !soft.is_dir() {
@@ -942,22 +945,8 @@ pub fn main_cli() {
                 );
                 return Ok(());
             }
-            let files: [(&str, &str); 12] = [
-                ("lmu.voc", "словник (ukr)"),
-                ("lmr.voc", "словник (rus)"),
-                ("lmur.vt", "postings (ukr)"),
-                ("lmru.vt", "postings (rus)"),
-                ("lmur.m", "метадані (ukr)"),
-                ("lmru.m", "метадані (rus)"),
-                ("lmu.g", "граф (ukr)"),
-                ("lmr.g", "граф (rus)"),
-                ("lmu.gw", "граф-weight (ukr)"),
-                ("lmr.gw", "граф-weight (rus)"),
-                ("lmsup.dll", "рушій (16-біт)"),
-                ("lmsup32.dll", "рушій (32-біт)"),
-            ];
             println!("Trident-індекси в {}: {}", o.baza.display(), soft.display());
-            for (name, role) in files.iter() {
+            for (name, role) in crate::trident::INVENTORY {
                 let p = soft.join(name);
                 match std::fs::metadata(&p) {
                     Ok(m) => println!("  {name:<14} {:>9} Б  ({role})", m.len()),
@@ -965,10 +954,88 @@ pub fn main_cli() {
                 }
             }
             println!();
+            if let Some(idx) = crate::trident::TridentIndex::open(&o.baza) {
+                let vt_min = idx.vt_u16.iter().copied().min();
+                let vt_max = idx.vt_u16.iter().copied().max();
+                println!(
+                    "windows.kod: {} кодів · lm.a: fold-пари R={} U={} · \
+                     словник lmu.voc: {} записів · vt-потік: {} u16 \
+                     (документи {}..{})",
+                    idx.kod.len(),
+                    idx.fold.rus.len(),
+                    idx.fold.ukr.len(),
+                    idx.dict_words.len(),
+                    idx.vt_u16.len(),
+                    vt_min.map(|x| x.to_string()).unwrap_or("-".into()),
+                    vt_max.map(|x| x.to_string()).unwrap_or("-".into()),
+                );
+            }
+            println!();
             println!(
-                "Повний Trident-рушій (пошук як у головному застосунку) — у розробці; \
-                 поточний пошук — власний fold-codec FTS (search/export)."
+                "Пошук нативним індексом — tsearch (експеримент); повне \
+                 покриття знаків та морфологія (.g/.gw) — v0.14.0. \
+                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
+            Ok(())
+        })(),
+        "tsearch" => (|| {
+            // Experimental native-index search: encode the query through the
+            // LmCode character table, look the terms up in the lmu.voc
+            // dictionary, read posting slices from lmur.vt. The document
+            // numbers are the native Trident ids of the 2005-era index; the
+            // join to the current base docnums is a later version.
+            require_baza(&o)?;
+            let q = get_query(&o)?;
+            if q.is_empty() {
+                usage();
+                bail!("tsearch needs <query> or --queryfile");
+            }
+            let Some(idx) = crate::trident::TridentIndex::open(&o.baza) else {
+                println!(
+                    "В базі {} немає робочого Trident-індексу (SOFT\\lmu.voc + \
+                     lmur.vt) — пошук: search.",
+                    o.baza.display()
+                );
+                return Ok(());
+            };
+            let r = idx.search(&q);
+            let pct = (r.coverage * 100.0).round() as u32;
+            println!("Trident tsearch (експеримент): «{q}»");
+            println!(
+                "  словник: {} слів · vt-потік: {} u16 · покриття знаків: {}% · \
+                 знайдено термінів: {}",
+                r.dict_size,
+                r.vt_size,
+                pct,
+                r.matched.len()
+            );
+            if !r.matched.is_empty() {
+                println!("  збіг: {}", r.matched.join(", "));
+            }
+            if r.docs.is_empty() {
+                println!(
+                    "  результат: 0 документів (таблиця знаків часткова, \
+                     точні word→postings кордони — v0.14.0)"
+                );
+            } else {
+                let shown = r
+                    .docs
+                    .iter()
+                    .take(40)
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "  результат: {} Trident-документів (native IDs 2005-індексу, \
+                     показано {}):",
+                    r.docs.len(),
+                    shown.len()
+                );
+                println!("    {shown}");
+                if r.docs.len() > 40 {
+                    println!("    … (ще {})", r.docs.len() - 40);
+                }
+            }
             Ok(())
         })(),
         _ => {

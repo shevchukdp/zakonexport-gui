@@ -337,7 +337,7 @@ fn key_compare_normal(a: &RowKey, b: &RowKey) -> std::cmp::Ordering {
 
 #[derive(Default, native_windows_derive::NwgUi)]
 pub struct App {
-    #[nwg_control(size: (1150, 780), position: (80, 40),
+    #[nwg_control(size: (1150, 804), position: (80, 40),
         title: "Zakon DB Exporter",
         flags: "WINDOW|VISIBLE|MINIMIZE_BOX|MAXIMIZE_BOX|SYS_MENU")]
     #[nwg_events(OnWindowClose: [nwg::stop_thread_dispatch()])]
@@ -499,6 +499,13 @@ pub struct App {
     #[nwg_control(parent: window, size: (280, 24), position: (712, 748),
         text: "підсвітити слова запиту")]
     chk_hl: nwg::CheckBox,
+
+    // experimental: search the base's native Trident index (SOFT\) instead of
+    // the built-in full-text engine — doc numbers are the native 2005-era
+    // ids (the join to the current base is v0.14.0)
+    #[nwg_control(parent: window, size: (280, 24), position: (712, 772),
+        text: "Trident-рушій (нативний індекс, експеримент)")]
+    chk_trident: nwg::CheckBox,
 
     #[nwg_control(parent: window, text: "Готово")]
     status: nwg::StatusBar,
@@ -757,9 +764,20 @@ impl App {
             fields.clear();
         }
         self.clear_list();
-        self.status
-            .set_text(0, &format!("Пошук «{query}» ({}, база: {label})…", kind.name()));
-        thread::spawn(move || search_worker(tx, baza, query, kind, gen));
+        let trident = self.chk_trident.check_state() == nwg::CheckBoxState::Checked;
+        self.status.set_text(
+            0,
+            &if trident {
+                format!("Trident-пошук «{query}» (база: {label})…")
+            } else {
+                format!("Пошук «{query}» ({}, база: {label})…", kind.name())
+            },
+        );
+        if trident {
+            thread::spawn(move || trident_search_worker(tx, baza, query, gen));
+        } else {
+            thread::spawn(move || search_worker(tx, baza, query, kind, gen));
+        }
     }
 
     /// Read the filter controls. `None` => a date is malformed (reported).
@@ -2072,6 +2090,54 @@ fn search_worker(
         }
         Err(e) => {
             let _ = tx.send(GuiMsg::SearchFail { gen, msg: format!("Помилка пошуку: {e}") });
+        }
+    }
+}
+
+/// Experimental native-index search (Trident, `SOFT\`): the document
+/// numbers are the native 2005-era Trident ids, so the field columns stay
+/// dashed (`fields = None`) until the doc-number join lands (v0.14.0).
+fn trident_search_worker(
+    tx: Sender<GuiMsg>,
+    baza: PathBuf,
+    query: String,
+    gen: usize,
+) {
+    match crate::trident::TridentIndex::open(&baza) {
+        Some(idx) => {
+            let r = idx.search(&query);
+            let pct = (r.coverage * 100.0).round() as u32;
+            let hits: Vec<db::Hit> = r
+                .docs
+                .into_iter()
+                .map(|docnum| db::Hit {
+                    docnum,
+                    file: "trident (native id)".to_string(),
+                    match_off: 0,
+                    matches: 1,
+                    title: String::new(),
+                })
+                .collect();
+            let fields = vec![None; hits.len()];
+            if hits.is_empty() {
+                let _ = tx.send(GuiMsg::SearchFail {
+                    gen,
+                    msg: format!(
+                        "Trident: «{query}» — 0 документів (покриття знаків {pct}%, \
+                         словник: {} слів, vt-потік: {} u16 — експериментальний рушій)",
+                        r.dict_size, r.vt_size
+                    ),
+                });
+            } else {
+                let _ = tx.send(GuiMsg::SearchDone { gen, hits, fields });
+            }
+        }
+        None => {
+            let _ = tx.send(GuiMsg::SearchFail {
+                gen,
+                msg: "В базі немає робочого Trident-індексу (SOFT\\lmu.voc + lmur.vt) — \
+                      зніміть прапорець «Trident-рушій»".to_string(),
+            });
         }
     }
 }

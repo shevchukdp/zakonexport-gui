@@ -19,6 +19,7 @@ pub mod picker;
 pub mod printdoc;
 pub mod render;
 pub mod signal;
+pub mod trident;
 pub mod update;
 pub mod writers;
 

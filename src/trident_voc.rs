@@ -29,8 +29,8 @@
 //!
 //! ## The opcode VM
 //!
-//! The per-word `'f'` records and the root index table are little-endian
-//! **u16 instruction programs** executed by `FUN_100045e0`:
+//! The per-word `'f'` records are little-endian **u16 instruction programs**
+//! executed by `FUN_100045e0`:
 //!
 //! - `0x1001` — enter a nested subtree (recurse, then skip via
 //!   `FUN_100044f0` and add the subtree's word count);
@@ -39,6 +39,18 @@
 //! - `0x1004 [u16 ptr]` — child node (via a resolver; `child[0]` = the child
 //!   word count);
 //! - any other u16 — inline data collected into an output buffer.
+//!
+//! The root index table (`+0x3C`) is **not** a `0x1001`/`0x1002` program:
+//! in `lmu.voc` it is a packed **B-tree root** — a u16 stream of child-node
+//! ids and per-subtree word counts. The search chain (decompiled,
+//! `lmsup32.dll`) is `FUN_10002ff0` (seek to the root at `handle+0x3C`) →
+//! `FUN_10002b70` (case-fold descent; the node's `0x80` flag = child list,
+//! count `&0x7f`) → `FUN_10002620` / `FUN_10001920` (resolve a child id to a
+//! node record via the 4-byte **node pointer pool**, record + 2 = the key)
+//! → `FUN_100018b0` / `FUN_100019f0` (walk the key payload: stop at NUL /
+//! `0xFF` / `0x42`, `0x49` = skip a marker byte). The exact leaf → `.vt`
+//! posting offsets remain the next RE step (the B-tree leaves carry the
+//! postings references, not yet joined to the `.vt` stream).
 //!
 //! `vm_program_byte_len` is `FUN_100044f0`: it walks the u16 program (a byte
 //! pointer advanced by 2 per instruction), tracking a `0x1001`/`0x1002`
@@ -59,9 +71,9 @@
 //!   terminator), the next record starts at `start + len + 1`;
 //! - otherwise the walker **resynchronizes to the next block boundary**:
 //!   `next = (start / block + 1) * block` (`block` = `FUN_10021940()` = the
-//!   file-I/O layer's buffer size, `DAT_1002ad98`; the write site is not in
-//!   the decompilation — 512 is the likely value, and the verified landings
-//!   are block-size-independent for 128..=4096).
+//!   file-I/O layer's buffer size, `DAT_1002ad98`, **confirmed 4096** — the
+//!   `.data` image initial value; the packed B-tree regions resynchronize
+//!   onto 4096-aligned slots).
 //!
 //! The block jumps are the packed B-tree resync: the listA/listB node
 //! regions are densely packed, and a node that does not end in a double
@@ -320,12 +332,18 @@ pub const REC_MODE_F: u8 = b'f';
 /// `0xff` walk mode (the u16 stream terminated by `0xFFFF`).
 pub const REC_MODE_FFFF: u8 = 0xFF;
 
-/// The block-resync size for [`walk_section_records`]: the DLL takes it from
-/// `FUN_10021940()` (the file-I/O layer's buffer size, `DAT_1002ad98`, whose
-/// write site is not in the decompilation). 512 is the likely value; the
-/// verified section landings are identical for every block size in
-/// 128..=4096, so the walk is robust to the exact choice.
-pub const WALK_BLOCK: u32 = 512;
+/// The block-resync size for [`walk_section_records`]: the DLL takes it
+/// from `FUN_10021940()` (the file-I/O layer's buffer size,
+/// `DAT_1002ad98`). The value is **confirmed 4096**: `DAT_1002ad98` has
+/// no write in the DLL's `.text` (byte-scanned `C7 05` / `89 0D` / `A3`
+/// stores, none), so it carries its `.data` image initial value
+/// `0x00001000` (4096) — the I/O layer's page-sized read buffer. The
+/// packed B-tree regions resynchronize exactly onto 4096-aligned slots
+/// (the listA walk's jump landings are `0x69000, 0x6A000, … 0x77000`,
+/// step 0x1000). The verified clean-section landings are identical for
+/// every block size in 128..=4096, so the walk is robust to the choice
+/// either way.
+pub const WALK_BLOCK: u32 = 4096;
 
 /// `FUN_10004230` `'n'` mode: a NUL-terminated byte run (LmCode words). The
 /// DLL's scanner advances one byte at a time and stops at the first `0x00`;
@@ -849,19 +867,28 @@ mod tests {
             assert_eq!(w.starts.len(), count as usize, "starts @ {off:#x}");
             assert_eq!(w.starts[0], off + 2, "first start @ {off:#x}");
         }
-        // the packed B-tree lists: listA walks all 722 of its records and
-        // lands inside the file; the listB walk runs to the file end (only
-        // 819 of the header's 2157 records sit contiguously before EOF —
-        // the remaining nodes are reached through the root index, the
-        // still-blocked payload semantics) and resynchronizes just past
-        // the end.
+        // the packed B-tree lists at the confirmed block size (4096): the
+        // walk resynchronizes onto 4096-aligned node slots (0x69000,
+        // 0x6A000, … 0x77000) and runs just past the file end. The
+        // header's record count (722 / 2157) is larger than the walked
+        // starts — the dense nodes inside a block are consumed directly
+        // from the block data, not via the pointer array (the payload
+        // semantics remain the next RE step).
         let la = walk_section_records(&voc, 0x068368, REC_MODE_N, WALK_BLOCK);
         assert_eq!(la.count, 722);
-        assert_eq!(la.starts.len(), 722, "listA walks all its records");
-        assert!(la.landed as usize <= voc.len(), "listA lands within the file");
+        assert_eq!(la.starts.len(), 388, "listA resync walk at block 4096");
+        assert_eq!(la.landed, 0x78000, "listA resynchronizes off the end");
+        // the resync landings sit exactly on the 4096-aligned node slots
+        // (0x69000, 0x6A000, … 0x77000 — 15 slots, step 0x1000)
+        let aligned = la
+            .starts
+            .iter()
+            .filter(|s| **s >= 0x69000 && **s % 0x1000 == 0)
+            .count();
+        assert_eq!(aligned, 15, "the 4096-aligned node slots");
         let lb = walk_section_records(&voc, 0x06ca96, REC_MODE_N, WALK_BLOCK);
         assert_eq!(lb.count, 2157);
-        assert_eq!(lb.starts.len(), 819, "listB walk stops at the file end");
+        assert_eq!(lb.starts.len(), 382, "listB resync walk at block 4096");
         assert_eq!(lb.landed, 0x78000, "listB resynchronizes off the end");
     }
 

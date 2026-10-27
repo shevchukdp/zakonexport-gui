@@ -16,6 +16,68 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.18.1 — 2026-10-27
+
+### UK
+- **Блок-розмір I/O-шару підтверджено: `WALK_BLOCK` = 4096** (було
+  кандидат 512 в v0.18.0):
+  - `DAT_1002ad98` (`FUN_10021940()`) **не має запису в `.text`**
+    (byte-scan варіантів `C7 05` / `89 0D` / `A3` з абсолютним
+    disp32 — 0 записів, лише 5 зчитувань `8B 35`/`A1`); отже глобальна
+    зберігає початкове значення образу `.data` = `0x00001000` =
+    **4096** (page-sized буфер читання);
+  - незалежне підтвердження даними: resync-лондінги listA
+    (packed B-tree) при блок=4096 лежать **точно** на 4096-алінованих
+    node-slots `0x69000, 0x6A000, … 0x77000` (15 слотів, step 0x1000);
+  - при 4096: listA обходить 388 resync-записів, listB — 382 (обидва
+    landings `0x78000`, за EOF); чисті секції (f/ff/афікси/33-слів/
+    +0x54/суфікси) не залежать від блоку — лондінги не змінюються.
+- **B-tree пошуковий ланцюг відстежено** (розбирання
+  `lmsup32.dll`, документація `trident_voc.rs` уточнена): root
+  u16-таблиця `+0x3C` = **корінь packed B-tree** (не opcode-VM):
+  `FUN_10002ff0` (seek до `handle+0x3C`) → `FUN_10002b70` (case-fold
+  descent; прапорець `0x80` вузла = список дітей, кількість `&0x7f`)
+  → `FUN_10002620`/`FUN_10001920` (node-ID → запис через 4-байтовий
+  **node pointer pool**, `+2` = ключ) → `FUN_100018b0`/`FUN_100019f0`
+  (payload: стоп NUL/`0xFF`/`0x42`, `0x49` = skip-маркер). Точні
+  leaf→`.vt` posting-офсети — наступний крок (v0.19.0).
+- Версія **0.18.0 → 0.18.1** (єдине джерело: `CARGO_PKG_VERSION`).
+- 114 юніт-тестів (асерти listA/listB оновлено під 4096: 388/382
+  resync-записи, 15 4096-алінованих слотів); guitest baseline
+  `rows=430` без змін.
+
+### EN
+- **I/O-layer block size confirmed: `WALK_BLOCK` = 4096** (was the
+  512 candidate in v0.18.0):
+  - `DAT_1002ad98` (`FUN_10021940()`) has **no store in `.text`**
+    (byte-scan of the `C7 05` / `89 0D` / `A3` forms with absolute
+    disp32 — zero stores, only five `8B 35`/`A1` loads); the global
+    therefore keeps its `.data` image initial value `0x00001000` =
+    **4096** (the page-sized read buffer);
+  - independent data-driven confirmation: the listA (packed B-tree)
+    resync landings at block=4096 sit **exactly** on the 4096-aligned
+    node slots `0x69000, 0x6A000, … 0x77000` (15 slots, step 0x1000);
+  - at 4096: the listA walk covers 388 resync records, listB 382
+    (both land at `0x78000`, just past EOF); the clean sections
+    (f/ff/affixes/33-word/+0x54/suffixes) are block-independent —
+    their landings are unchanged.
+- **The B-tree search chain traced** (disassembled `lmsup32.dll`;
+  the `trident_voc.rs` docs corrected): the root u16 table `+0x3C` is
+  a **packed B-tree root** (not an opcode-VM): `FUN_10002ff0` (seek
+  to `handle+0x3C`) → `FUN_10002b70` (case-fold descent; the node's
+  `0x80` flag = the child list, count `&0x7f`) →
+  `FUN_10002620`/`FUN_10001920` (a node id resolves to a record via
+  the 4-byte **node pointer pool**, `+2` = the key) →
+  `FUN_100018b0`/`FUN_100019f0` (payload walk: stop at NUL / `0xFF` /
+  `0x42`, `0x49` = a skip marker). The exact leaf → `.vt` posting
+  offsets remain the next step (v0.19.0).
+- Version **0.18.0 → 0.18.1** (single source: `CARGO_PKG_VERSION`).
+- 114 unit tests (the listA/listB assertions updated for 4096:
+  388/382 resync records, 15 4096-aligned slots); the guitest
+  baseline `rows=430` is unchanged.
+
+---
+
 ## v0.18.0 — 2026-10-27
 
 ### UK

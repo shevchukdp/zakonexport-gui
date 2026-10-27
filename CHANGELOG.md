@@ -16,6 +16,116 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.18.0 — 2026-10-27
+
+### UK
+- **Граф лем-граматики `lmu.g` структурно декодовано** (нова
+  `src/g_graph.rs`, підключена до `TridentIndex.graph` + CLI-дієслово
+  `trident`):
+  - заголовок: 0x00–0x17 вендор «Trident Software, Inc.» + NUL;
+    0x18–0x1E «grammar»; 0x22 мовний символ ('U'/'R'); 0x24–0x2F
+    12-байтовий slot шаблону («TEMPLATE.TXT» / «lmr.gt»);
+  - u16-потік графа @0x60 (lmu.g: 31796 u16, head
+    `0002 001c 0002 000c 0001 dd0a 0000 014c…`);
+  - хвіст: NUL-терміновані маркери **POINT1/POINT2/STEP/REPEAT**
+    (всі чотири — в обох файлах);
+  - **`.gw` weight-стрим** (lmu.gw: 134 u16; лише 4 значення з
+    прапором `0x8000` — термінатори; last-six
+    `8053 8054 8057 8058 0000 0000`).
+- **Record-walker `.voc` — `FUN_10004230`** (розширення
+  `src/trident_voc.rs`, `TridentIndex.morphology.walks` + новий блок
+  CLI `trident` «записники»):
+  - довжини записів по режимах (розбирання `lmsup32.dll`):
+    `'n'` = `record_len_n` (по-байтовий скан до першого `0x00`,
+    ключове: DLL рухає `short*` **по 1 байту** —
+    `(short *)((int)p + 1)`), `'f'` = `vm_record_len`, `0xff` =
+    `record_len_ffff` (u16-потік до `0xFFFF`, термінатор
+    включено), `'e'` = `record_len_e` (byte-VM: `J`+1,
+    `F`/`G`/`C`/`E`+2, стоп `0xFF`);
+  - `walk_section_records` — правило просування DLL: NUL після
+    запису → `+1` (подвійний NUL), інакше **block-resync** до
+    межі блоку (`block` = `FUN_10021940()` = `DAT_1002ad98`,
+    розмір буфера I/O-шару; точні лондінги незалежні від
+    розміру блоку в межах 128..=4096, кандидат 512);
+  - section→mode мапа з завантажувача `FUN_100032d0`:
+    `+0x48`→'f', `+0x58`→ff, `+0x4C/0x50/0x54/0x60/0x64/0x68/0x6C/
+    0x70`→'n', `+0x5C`→raw seek;
+  - **підтверджені точні кордони** (lmu.voc): f @`0x75253`
+    (142) → `0x764C5`; ff @`0x764C5` (12) → `0x765B1`; афікси
+    @`0x765B2` (7) → `0x765E1`; 33-слів @`0x765E1` → `0x7667A`;
+    +0x54 @`0x76691` (32) → `0x76714`; суфікси @`0x76714` (722)
+    → `0x77B78` — кожен лондінг = точний офсет наступної
+    секції; listA (722) обходить усі свої записи, listB (2157)
+    обходить 819 і resync'ається за кінець файлу (`0x78000`) —
+    payload-семантика B-tree-вузлів (join word→.vt) лишається
+    наступним кроком (v0.19.0).
+- Версія **0.17.0 → 0.18.0** (єдине джерело: `CARGO_PKG_VERSION`).
+- **114 юніт-тестів** (нові: `trident_voc::tests::{record_len_…
+  ×4, walk_records_land_on_the_verified_section_boundaries,
+  walk_landings_are_block_size_independent, morphology_walks_
+  cover_the_walkable_slots, section_mode_maps_the_loader_slots}`
+  + `g_graph::tests::{…}` ×6); guitest baseline `rows=430` без
+  змін.
+
+### EN
+- **The `.g` grammar graph decoded structurally** (new
+  `src/g_graph.rs`, wired into `TridentIndex.graph` + the
+  `trident` CLI verb):
+  - the header: 0x00–0x17 vendor «Trident Software, Inc.» + NUL;
+    0x18–0x1E «grammar»; 0x22 the language char ('U'/'R');
+    0x24–0x2F the 12-byte template slot («TEMPLATE.TXT» /
+    «lmr.gt»);
+  - the graph u16 stream @0x60 (lmu.g: 31796 u16, head
+    `0002 001c 0002 000c 0001 dd0a 0000 014c…`);
+  - the tail: NUL-terminated **POINT1/POINT2/STEP/REPEAT**
+    markers (all four present in both files);
+  - **the `.gw` weight stream** (lmu.gw: 134 u16; only 4 values
+    carry the `0x8000` flag — the terminators; last six
+    `8053 8054 8057 8058 0000 0000`).
+- **The `.voc` record walker — `FUN_10004230`** (extended
+  `src/trident_voc.rs`, `TridentIndex.morphology.walks` + a new
+  `trident` CLI «записники» block):
+  - the per-mode record lengths (disassembled `lmsup32.dll`):
+    `'n'` = `record_len_n` (byte scan to the first `0x00`; the
+    key point: the DLL advances the `short*` **one byte at a
+    time** — `(short *)((int)p + 1)`), `'f'` = `vm_record_len`,
+    `0xff` = `record_len_ffff` (u16 stream to `0xFFFF`, the
+    terminator included), `'e'` = `record_len_e` (byte VM:
+    `J`+1, `F`/`G`/`C`/`E`+2, stop at `0xFF`);
+  - `walk_section_records` — the DLL's advance rule: a NUL after
+    the record → `+1` (the double NUL), otherwise a **block
+    resync** to the block boundary (`block` = `FUN_10021940()` =
+    `DAT_1002ad98`, the I/O layer's buffer size; the verified
+    landings are block-size-independent for 128..=4096, 512 is
+    the candidate);
+  - the section→mode map from the `FUN_100032d0` loader:
+    `+0x48`→'f', `+0x58`→ff, `+0x4C/0x50/0x54/0x60/0x64/0x68/
+    0x6C/0x70`→'n', `+0x5C`→raw seek;
+  - **the verified exact boundaries** (lmu.voc): f @`0x75253`
+    (142) → `0x764C5`; ff @`0x764C5` (12) → `0x765B1`;
+    affixes @`0x765B2` (7) → `0x765E1`; 33-word @`0x765E1` →
+    `0x7667A`; +0x54 @`0x76691` (32) → `0x76714`; suffixes
+    @`0x76714` (722) → `0x77B78` — each landing is exactly the
+    *next* section's offset; the listA (722) walk covers all of
+    its records, the listB (2157) walk covers 819 and
+    resynchronizes just past the file end (`0x78000`) — the
+    B-tree node payload semantics (the word→.vt join) remain the
+    next step (v0.19.0).
+- Version **0.17.0 → 0.18.0** (single source: `CARGO_PKG_VERSION`).
+- **114 unit tests** (new: `trident_voc::tests::{record_len_…
+  ×4, walk_records_land_on_the_verified_section_boundaries,
+  walk_landings_are_block_size_independent, morphology_walks_
+  cover_the_walkable_slots, section_mode_maps_the_loader_slots}`
+  + `g_graph::tests::{…}` ×6); the guitest baseline `rows=430`
+  is unchanged.
+
+### Roadmap (v0.19.0)
+- Точні word→postings кордони: payload B-tree-вузлів listA/listB
+  (join у `.vt`-посилання) — споживчий код пошуку в
+  `lmsup32.dll`; семантика ребер `.g`-графа (template-walk
+  споживач u16-потіку); блок-розмір `DAT_1002ad98` (кандидат
+  512, запис у I/O-шарі).
+
 ## v0.17.0 — 2026-10-27
 
 ### UK

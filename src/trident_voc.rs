@@ -249,6 +249,61 @@ impl VocSectionTable {
     }
 }
 
+/// The u16 tuning-parameter block at header offset `0x80` of a `.voc`
+/// file (immediately after the u32 section table `0x40..0x7F`).
+///
+/// `lmu.voc` decodes to `2,2,1,0x600,2,2,0x42,0x2000,0x20,0x108,0x104,0x10,
+/// 2,4,0x80,0x400`; `lmr.voc` decodes to `2,1,0x220,0x402,0x800,0x10,8,4`
+/// (the rest zero). The individual roles are only partially identified from
+/// the DLL (`lmsup32.dll`) walkers — the values that line up with observed
+/// constants get a named accessor, the rest stay in `raw`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VocParams {
+    /// The 16 raw u16 values in file order (`0x80 + 2*i`).
+    pub raw: [u16; 16],
+}
+
+impl VocParams {
+    /// Parse the parameter block. Requires a file of at least `0x98` bytes.
+    pub fn parse(voc: &[u8]) -> Option<Self> {
+        if voc.len() < 0x98 {
+            return None;
+        }
+        let mut raw = [0u16; 16];
+        for i in 0..16 {
+            raw[i] = u16::from_le_bytes([
+                voc[0x80 + 2 * i],
+                voc[0x80 + 2 * i + 1],
+            ]);
+        }
+        Some(VocParams { raw })
+    }
+
+    /// `[6]` — the listA record stop-marker u16. `lmu.voc` holds `0x42`
+    /// (`'B'`), which is exactly the terminator u16 the listA record
+    /// walker (`FUN_10004230`, mode `n`) stops on.
+    pub fn stop_marker(&self) -> u16 {
+        self.raw[6]
+    }
+
+    /// `[7]` — a block/page-style constant (`lmu.voc`: `0x2000` = 8192).
+    pub fn page_const(&self) -> u16 {
+        self.raw[7]
+    }
+
+    /// `[8]` — `lmu.voc` holds `0x20` (32), which matches the record count
+    /// of the `+0x54` section (the known `sec_54` count).
+    pub fn sec_54_count(&self) -> u16 {
+        self.raw[8]
+    }
+
+    /// `[9]` — `lmu.voc` holds `0x108` (264), exactly the size of
+    /// `lmr.gw` (the morphology weight file).
+    pub fn gw_size(&self) -> u16 {
+        self.raw[9]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The opcode VM
 // ---------------------------------------------------------------------------
@@ -592,6 +647,9 @@ pub struct Morphology {
     /// the `FUN_10004230` record walks of every walkable section
     /// (`(slot, walk)`, block = [`WALK_BLOCK`])
     pub walks: Vec<(u32, SectionWalk)>,
+    /// the u16 tuning-parameter block @0x80 (`None` when the file is
+    /// shorter than `0x98` bytes)
+    pub params: Option<VocParams>,
 }
 
 impl Morphology {
@@ -646,6 +704,7 @@ impl Morphology {
             0
         };
         let walks = walk_sections(voc, &table, WALK_BLOCK);
+        let params = VocParams::parse(voc);
         Some(Morphology {
             table,
             affixes,
@@ -656,6 +715,7 @@ impl Morphology {
             list_b_count,
             per_word_f_count,
             walks,
+            params,
         })
     }
 
@@ -743,6 +803,30 @@ mod tests {
         assert_eq!(t.dual_count(t.dual_74), 722, "listA count");
         assert_eq!(t.dual_count(t.dual_78), 516, "dual_78 count");
         assert_eq!(t.dual_count(t.dual_7c), 32, "digraph count");
+    }
+
+    #[test]
+    fn params_block_parses_the_real_lmu_voc() {
+        let Some(voc) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.voc").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let p = VocParams::parse(&voc).expect("params");
+        // the confirmed @0x80 values (see the byte dump)
+        assert_eq!(
+            p.raw,
+            [
+                0x0002, 0x0002, 0x0001, 0x0600, 0x0002, 0x0002, 0x0042, 0x2000, 0x0020,
+                0x0108, 0x0104, 0x0010, 0x0002, 0x0004, 0x0080, 0x0400
+            ]
+        );
+        assert_eq!(p.stop_marker(), 0x42, "listA stop marker 'B'");
+        assert_eq!(p.page_const(), 0x2000);
+        assert_eq!(p.sec_54_count(), 0x20, "sec_54 count");
+        assert_eq!(p.gw_size(), 0x108, "lmr.gw size");
+        // Morphology carries the block
+        let m = Morphology::parse(&voc).expect("morph");
+        assert!(m.params.is_some());
     }
 
     #[test]

@@ -16,6 +16,94 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.19.0 — 2026-10-28
+
+### UK
+- **Точний leaf→`.vt` stem-join** (замінює пропорційний `posting_slice`
+  як основний доказ; той лишається fallback):
+  - `.vt` layout **експериментально декодовано**: 64B-заголовок
+    (vendor «Trident Soft. Inc.» @0x00, name @0x18, `FREE` @0x38,
+    u32 @0x3C = **хвіст** = кінець record-потіку) + **14160
+    NUL-термінованих записів** `[u8 count][payload][NUL]`, зажатих
+    `0x40..0xCCDE5` (`lmur.vt`; `lmru.vt`: хвіст `0xD2648` = len−4).
+    Payload = **case-folded Latin-стеблі** («не»→`NE`, «по»→`PO`,
+    «пере»→`PERE`, «спів»→`SPV`, «був»→`BUV`, «неч»→`HCH`) + u16-
+    слова (документи 0..65535). Потік в тому ж порядку сортування,
+    що й `.voc` словник.
+  - новий модуль **`src/trident_vt.rs`**: `TridentFileHeader`,
+    `VtRecordStream` (walk + `find_stem`), `VmHeader` (`.m`: 64B +
+    u32-таблиця @0x40, `lmur.m`: `0x1000, 0x88, 0xBCB, 0x726, 0xA1,
+    0x206D, 0x244B, 0x29D7`, хвіст @0x70E); документація DLL
+    join-ланцюга (`FUN_10015340` ctx init, `FUN_100176c0`
+    word-таблиця @ctx+0x44, `FUN_10015cd0` predicate-таблиця @ctx+0x30,
+    `FUN_100177d0` doc-flag предикати з `.m`, `FUN_100134d0` tail
+    scan, `FUN_100019f0` byte-VM).
+  - **`src/trident.rs`**: `latin_candidates` (LATIN_VARIANTS —
+    контекстно-двозначний Latin-маппінг із пріоритетними варіантами,
+    cap 32) + `exact_postings(word)` (stem hit → record + його u16-
+    список) + `TridentResult.joined: Vec<(candidate, record_off,
+    Vec<u16>)>`; `search()` — exact-join як primary, `posting_slice` —
+    fallback. «був» → `[a1 e3 a2]` → `BUV` → 2 records
+    (@0x5362b / @0x84181 — підтверджені офсети).
+- **`.voc` u16-параметри @0x80** (`trident_voc.rs`): `VocParams`
+  (16 u16: `2,2,1,0x600,2,2,0x42,0x2000,0x20,0x108,0x104,0x10,2,4,
+  0x80,0x400`); ідентифіковано: `[6]` = listA stop-marker `0x42`,
+  `[8]` = sec_54 count (32), `[9]` = `lmr.gw` size (264),
+  `[7]` = page-константа 0x2000.
+- **CLI**: `trident` — нові блоки (`.vt record-потік: 14160
+  record-ів 0x40..0xccde5 · 76225 Latin-run · 402210 u16-слів`;
+  `.m: u32-таблиця + хвіст @0x70e`; `параметри @0x80: stop=0x42
+  блок=0x2000 sec_54=32 gw=264`); `tsearch` — рядок точного join
+  (record-офсет + u16-список).
+- **125 юніт-тестів** (нові: `trident_vt` — header/stream/14160-
+  walk/find_stem/`.m`; `VocParams` на реальному `lmu.voc`;
+  `latin_candidates`/`exact_postings`). Guitest baseline `rows=430`
+  без змін. Версія **0.18.1 → 0.19.0**.
+
+### EN
+- **Exact leaf→`.vt` stem-join** (replaces the proportional
+  `posting_slice` as the primary evidence; it stays the fallback):
+  - the `.vt` layout was **empirically decoded**: a 64-byte header
+    (vendor «Trident Soft. Inc.» @0x00, name @0x18, `FREE` @0x38,
+    u32 @0x3C = **tail** = the end of the record stream) plus **14160
+    packed NUL-terminated records** `[u8 count][payload][NUL]` in
+    `0x40..0xCCDE5` (`lmur.vt`; `lmru.vt`: tail `0xD2648` = len−4).
+    Payload = **case-folded Latin stems** («не»→`NE`, «по»→`PO`,
+    «пере»→`PERE`, «спів»→`SPV`, «був»→`BUV`, «неч»→`HCH`) + u16
+    words (documents 0..65535). The stream keeps the `.voc`
+    dictionary's sort order.
+  - new module **`src/trident_vt.rs`**: `TridentFileHeader`,
+    `VtRecordStream` (the walk + `find_stem`), `VmHeader` (`.m`:
+    64-byte header + the u32 table @0x40 — `lmur.m`: `0x1000, 0x88,
+    0xBCB, 0x726, 0xA1, 0x206D, 0x244B, 0x29D7`, tail @0x70E);
+    docs of the DLL join chain (`FUN_10015340` context init,
+    `FUN_100176c0` word table @ctx+0x44, `FUN_10015cd0` predicate
+    table @ctx+0x30, `FUN_100177d0` doc-flag predicates over `.m`,
+    `FUN_100134d0` the tail scan, `FUN_100019f0` the byte-VM).
+  - **`src/trident.rs`**: `latin_candidates` (`LATIN_VARIANTS` — the
+    context-dependent Latin mapping with preferred variants, capped
+    at 32) + `exact_postings(word)` (stem hit → the record + its u16
+    list) + `TridentResult.joined: Vec<(candidate, record_off,
+    Vec<u16>)>`; `search()` runs the exact join first, the
+    `posting_slice` remains the fallback. «був» → `[a1 e3 a2]` →
+    `BUV` → 2 records (@0x5362b / @0x84181, the confirmed offsets).
+- **`.voc` u16 parameters @0x80** (`trident_voc.rs`): `VocParams`
+  (16 u16: `2,2,1,0x600,2,2,0x42,0x2000,0x20,0x108,0x104,0x10,2,4,
+  0x80,0x400`); identified fields: `[6]` = the listA stop marker
+  `0x42`, `[8]` = the sec_54 count (32), `[9]` = the `lmr.gw` size
+  (264), `[7]` = the 0x2000 page constant.
+- **CLI**: `trident` — new blocks (`.vt record stream: 14160
+  records 0x40..0xccde5 · 76225 Latin runs · 402210 u16 words`;
+  `.m: u32 table + tail @0x70e`; `params @0x80: stop=0x42 block=
+  0x2000 sec_54=32 gw=264`); `tsearch` — the exact-join line (the
+  record offset + the u16 list).
+- **125 unit tests** (new: `trident_vt` — header / stream / the
+  14160 walk / `find_stem` / `.m`; `VocParams` on the real
+  `lmu.voc`; `latin_candidates` / `exact_postings`). The guitest
+  baseline `rows=430` is unchanged. Version **0.18.1 → 0.19.0**.
+
+---
+
 ## v0.18.1 — 2026-10-27
 
 ### UK

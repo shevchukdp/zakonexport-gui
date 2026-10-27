@@ -391,6 +391,107 @@ pub fn encode_term(term: &str, fold: &Fold) -> (Vec<u8>, u32, u32) {
     (out, encodable, chars.len() as u32)
 }
 
+/// The Ukrainian letter → Latin-index-alphabet variants (v0.19.0).
+///
+/// The `.vt` record stream stores the dictionary words re-encoded into a
+/// case-folded Latin alphabet (the DLL's index form). The empirical
+/// anchors (confirmed against the real `lmur.vt` stream): «не»→`NE`,
+/// «по»→`PO`, «пере»→`PERE` (inside `APEREMM`, `NAPEREMHE`, …),
+/// «спів»→`SPV` (і→`V`), «був»→`BUV` (в→`V`), «бус»→`BUS` (з→`S`,
+/// б→`B`), «неч»→`HCH` (here н→`H`, ч→`C`), Ї→`Y`.
+///
+/// The mapping is **context-dependent** (н maps to `N` in «не» but to `H`
+/// in «неч»; в maps to `V` in «був» but `W`/`B` elsewhere — the stems are
+/// graph-normalized through `lmu.g`), so this table carries *preferred*
+/// variants first plus the observed alternates; [`latin_candidates`]
+/// expands them breadth-first with a cap.
+const LATIN_VARIANTS: &[(char, &[&str])] = &[
+    ('а', &["A"]),
+    ('б', &["B"]),
+    ('в', &["V", "W", "B"]),
+    ('г', &["G"]),
+    ('д', &["D"]),
+    ('е', &["E"]),
+    ('є', &["E"]),
+    ('ж', &["H", "J"]),
+    ('з', &["Z", "S"]),
+    ('и', &["I"]),
+    ('і', &["I", "V"]),
+    ('ї', &["YI", "Y"]),
+    ('й', &["Y", "J"]),
+    ('к', &["K"]),
+    ('л', &["L"]),
+    ('м', &["M"]),
+    ('н', &["N", "H"]),
+    ('о', &["O", "Q"]),
+    ('п', &["P"]),
+    ('р', &["R"]),
+    ('с', &["S", "Z"]),
+    ('т', &["T"]),
+    ('у', &["U"]),
+    ('ф', &["F"]),
+    ('х', &["H"]),
+    ('ц', &["C"]),
+    ('ч', &["CH", "C"]),
+    ('ш', &["SH", "S"]),
+    ('щ', &["SCH", "SH"]),
+    ('ъ', &["", "J"]),
+    ('ы', &["Y"]),
+    ('ь', &["", "J"]),
+    ('э', &["E"]),
+    ('ю', &["Y", "IU"]),
+    ('я', &["Y", "JA"]),
+    ('ґ', &["G"]),
+];
+
+/// The capped total number of Latin candidates per LmCode word
+/// (ambiguity explodes multiplicatively; the first 32 in BFS order are
+/// the preferred variants).
+const LATIN_CANDIDATE_CAP: usize = 32;
+
+/// The case-folded Latin candidates of a LmCode word (v0.19.0): every
+/// letter expands through [`LATIN_VARIANTS`] (preferred variant first,
+/// breadth-first), digits pass through verbatim. A word that cannot be
+/// mapped at all yields an empty list. Capped at [`LATIN_CANDIDATE_CAP`].
+pub fn latin_candidates(bytes: &[u8]) -> Vec<String> {
+    let mut cands: Vec<String> = vec![String::new()];
+    for &b in bytes {
+        let variants: Vec<String> = if b.is_ascii_digit() {
+            // digits pass through verbatim (they sort before letters in
+            // the stream, exactly as in the dictionary)
+            vec![String::from(b as char)]
+        } else {
+            let Some(c) = lm_byte_to_char(b) else {
+                return Vec::new(); // unmappable byte
+            };
+            let Some((_, vs)) = LATIN_VARIANTS.iter().find(|(lc, _)| *lc == c) else {
+                return Vec::new();
+            };
+            vs.iter().map(|s| s.to_string()).collect()
+        };
+        let mut next: Vec<String> = Vec::with_capacity(cands.len() * variants.len());
+        for c in &cands {
+            for v in &variants {
+                next.push(format!("{c}{v}"));
+            }
+        }
+        // de-duplicate in order, then cap (preferred variants come first)
+        let mut seen: Vec<String> = Vec::new();
+        for s in next {
+            if !seen.contains(&s) {
+                seen.push(s);
+            }
+            if seen.len() == LATIN_CANDIDATE_CAP {
+                break;
+            }
+        }
+        cands = seen;
+    }
+    // drop empties (a word made only of ь/ъ under their empty variant)
+    cands.retain(|s| !s.is_empty());
+    cands
+}
+
 // ---------------------------------------------------------------------------
 // the index
 // ---------------------------------------------------------------------------
@@ -421,6 +522,12 @@ pub struct TridentIndex {
     /// the structurally decoded `.g` grammar graph (header + stream
     /// fingerprint) — `None` when `lmu.g` is absent
     pub graph: Option<crate::g_graph::GGraph>,
+    /// the exact `.vt` record stream (14160 packed NUL records
+    /// `0x40..header[0x3C]`, v0.19.0) — `None` when the stream walk fails
+    pub vt_stream: Option<crate::trident_vt::VtRecordStream>,
+    /// the `.m` per-word metadata header (64-byte header + the u32 table
+    /// @0x40, v0.19.0) — `None` when `lmur.m` is absent
+    pub vm_header: Option<crate::trident_vt::VmHeader>,
     pub inventory: Vec<InventoryFile>,
 }
 
@@ -433,6 +540,10 @@ pub struct TridentResult {
     pub docs: Vec<u32>,
     /// the terms that were found in the dictionary
     pub matched: Vec<String>,
+    /// the exact stem join hits (v0.19.0): `(Latin candidate, .vt record
+    /// offset, the record's u16 word list)` — the case-folded dictionary
+    /// stems found in the `.vt` record stream, with their posting evidence
+    pub joined: Vec<(String, usize, Vec<u16>)>,
     /// fraction of the query that could be encoded (0.0..=1.0)
     pub coverage: f64,
     pub dict_size: usize,
@@ -488,6 +599,11 @@ impl TridentIndex {
         let morphology = crate::trident_voc::Morphology::parse(&voc);
         // the `.g` grammar graph (structural decode: header + stream fingerprint)
         let graph = read("lmu.g").as_deref().and_then(crate::g_graph::GGraph::parse);
+        // the exact `.vt` record stream + `.m` metadata header (v0.19.0)
+        let vt_stream = crate::trident_vt::VtRecordStream::parse(&vt);
+        let vm_header = read("lmur.m")
+            .as_deref()
+            .and_then(|m| crate::trident_vt::VmHeader::parse(m, 8));
 
         let inventory: Vec<InventoryFile> = INVENTORY
             .iter()
@@ -507,6 +623,8 @@ impl TridentIndex {
             gw_u16,
             morphology,
             graph,
+            vt_stream,
+            vm_header,
             inventory,
         })
     }
@@ -520,9 +638,16 @@ impl TridentIndex {
     /// Experimental native search: encode the query terms, look them up in
     /// the dictionary (prefix-style, with suffix trimming), read a posting
     /// slice from `.vt`.
+    ///
+    /// v0.19.0: every term is *also* run through the exact stem join
+    /// ([`exact_postings`]) against the `.vt` record stream — the case-
+    /// folded Latin stems are the primary posting evidence; the
+    /// proportional `posting_slice` remains the fallback for terms whose
+    /// stem the exact join does not resolve.
     pub fn search(&self, query: &str) -> TridentResult {
         let mut matched: Vec<String> = Vec::new();
         let mut docs: Vec<u32> = Vec::new();
+        let mut joined: Vec<(String, usize, Vec<u16>)> = Vec::new();
         let mut total_chars = 0u32;
         let mut encodable = 0u32;
 
@@ -533,6 +658,8 @@ impl TridentIndex {
             if bytes.is_empty() {
                 continue;
             }
+            // the exact stem join (v0.19.0 primary evidence)
+            let term_hits = self.exact_postings(raw);
             // candidate byte vectors: the whole term + suffix-trimmed
             // variants (drop 1, 2, 3 trailing bytes — stem-style matching).
             // A candidate matches a dictionary word it is a *prefix* of.
@@ -548,14 +675,18 @@ impl TridentIndex {
                 }
                 if let Some(idx) = self.find_prefix(&cand) {
                     found = true;
-                    // posting slice (experimental proportional heuristic)
-                    docs.extend(self.posting_slice(idx));
+                    // posting slice — the fallback heuristic, kept when the
+                    // exact join found nothing for this term
+                    if term_hits.is_empty() {
+                        docs.extend(self.posting_slice(idx));
+                    }
                     break;
                 }
             }
             if found {
                 matched.push(raw.to_string());
             }
+            joined.extend(term_hits);
         }
 
         docs.sort();
@@ -568,6 +699,7 @@ impl TridentIndex {
         TridentResult {
             docs,
             matched,
+            joined,
             coverage,
             dict_size: self.dict_words.len(),
             vt_size: self.vt_u16.len(),
@@ -639,6 +771,49 @@ impl TridentIndex {
             .filter(|&&d| d != 0)
             .map(|&d| u32::from(d))
             .collect()
+    }
+
+    /// The exact stem join (v0.19.0): encode `term` to LmCode, expand it
+    /// into case-folded Latin candidates ([`latin_candidates`]) and look
+    /// each candidate up in the `.vt` record stream
+    /// ([`VtRecordStream::find_stem`](crate::trident_vt::VtRecordStream::find_stem)).
+    ///
+    /// Returns `(candidate, record offset, the record's u16 words)` for the
+    /// matching records (deduplicated by record offset, capped at 32).
+    /// Empty when the term is not fully encodable or the `.vt` stream is
+    /// absent. This is the join that replaces the proportional
+    /// [`posting_slice`] heuristic as the *primary* evidence; the full
+    /// B-tree predicate join (`FUN_100176c0` u16 word table) is blocked on
+    /// the tail B-tree decode (v0.20).
+    pub fn exact_postings(&self, term: &str) -> Vec<(String, usize, Vec<u16>)> {
+        let Some(stream) = &self.vt_stream else {
+            return Vec::new();
+        };
+        let (bytes, encodable, total) = encode_term(term, &self.fold.ukr);
+        if bytes.is_empty() || encodable < total {
+            return Vec::new();
+        }
+        let cands = latin_candidates(&bytes);
+        let mut out: Vec<(String, usize, Vec<u16>)> = Vec::new();
+        for cand in &cands {
+            if out.len() >= 32 {
+                break;
+            }
+            for (i, _) in stream.find_stem(cand) {
+                if out.iter().any(|(_, off, _)| *off == stream.records[i].off) {
+                    continue;
+                }
+                out.push((
+                    cand.clone(),
+                    stream.records[i].off,
+                    stream.records[i].u16_words.clone(),
+                ));
+                if out.len() >= 32 {
+                    break;
+                }
+            }
+        }
+        out
     }
 }
 
@@ -948,6 +1123,8 @@ mod tests {
             gw_u16: Vec::new(),
             morphology: None,
             graph: None,
+            vt_stream: None,
+            vm_header: None,
             inventory: Vec::new(),
         };
         let r = idx.search("а0"); // encodes to [0xA4, 0x30] — no match
@@ -984,5 +1161,60 @@ mod tests {
         // the inventory must list 16 files, all present in this base
         assert_eq!(idx.inventory.len(), 16);
         assert!(idx.inventory.iter().all(|f| f.size > 0));
+    }
+
+    #[test]
+    fn latin_candidates_expand_the_known_stems() {
+        // «не» = [0xAD, 0xA5] → {N,H} × {E}
+        assert_eq!(
+            latin_candidates(&[0xAD, 0xA5]),
+            vec!["NE".to_string(), "HE".to_string()]
+        );
+        // «по» = [0xAF, 0xAE] → {P} × {O,Q}
+        assert_eq!(
+            latin_candidates(&[0xAF, 0xAE]),
+            vec!["PO".to_string(), "PQ".to_string()]
+        );
+        // «був» = [0xA1, 0xE3, 0xA2] → {B} × {U} × {V,W,B}
+        assert_eq!(
+            latin_candidates(&[0xA1, 0xE3, 0xA2]),
+            vec![
+                "BUV".to_string(),
+                "BUW".to_string(),
+                "BUB".to_string()
+            ]
+        );
+        // digits pass through verbatim (they sort before letters in the
+        // stream, exactly as in the dictionary)
+        assert_eq!(latin_candidates(&[0xAF, 0x33, 0x30]), vec!["P30".to_string()]);
+        // an unmappable byte yields no candidates
+        assert!(latin_candidates(&[0x01]).is_empty());
+    }
+
+    #[test]
+    fn exact_postings_find_the_confirmed_stems_in_the_real_vt() {
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let idx = TridentIndex::open(baza).expect("index should load");
+        // «був» → LmCode [0xA1, 0xE3, 0xA2] → "BUV" (confirmed in lmur.vt
+        // at 0x537d0 / 0x8422f)
+        let hits = idx.exact_postings("був");
+        assert!(!hits.is_empty(), "BUV must be found in the .vt stream");
+        let (cand, off, _u16s) = &hits[0];
+        assert!(
+            ["BUV", "BUW", "BUB"].contains(&cand.as_str()),
+            "candidate {cand}"
+        );
+        assert!(*off >= 0x40 && *off < 0xCCDE5, "record offset in range");
+        // «пере» → "PERE" (found inside APEREMM, NAPEREMHE, …)
+        assert!(!idx.exact_postings("пере").is_empty());
+        // search() carries the join hits
+        let r = idx.search("був");
+        assert!(!r.joined.is_empty(), "search must report the join");
+        // an unknown word finds nothing
+        assert!(idx.exact_postings("zzzz").is_empty());
     }
 }

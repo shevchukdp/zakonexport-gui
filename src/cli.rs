@@ -1044,6 +1044,45 @@ pub fn main_cli() {
                         }
                     }
                 }
+                // the exact `.vt` record stream + `.m` metadata header (v0.19.0)
+                if let Some(s) = &idx.vt_stream {
+                    let runs: usize = s
+                        .records
+                        .iter()
+                        .map(|r| r.latin_runs.len())
+                        .sum();
+                    let u16s: usize = s.records.iter().map(|r| r.u16_words.len()).sum();
+                    println!(
+                        "lmur.vt: {} — {} record-ів (запис [u8 count][payload][NUL], \
+                         0x40..0x{:x}) · {} Latin-run-ів · {} u16-слів",
+                        s.header.name,
+                        s.records.len(),
+                        s.end,
+                        runs,
+                        u16s,
+                    );
+                }
+                if let Some(m) = &idx.vm_header {
+                    let table: Vec<String> =
+                        m.table.iter().map(|v| format!("0x{v:x}")).collect();
+                    println!(
+                        "lmur.m: {} — метадані за словами (0xE-структури \
+                         FUN_100177d0) · u32-таблиця @0x40: {} · хвіст @0x{:x}",
+                        m.header.name,
+                        table.join(" "),
+                        m.header.tail,
+                    );
+                }
+                if let Some(p) = idx.morphology.as_ref().and_then(|m| m.params) {
+                    println!(
+                        "lmu.voc параметри @0x80: stop=0x{:02x} блок=0x{:x} \
+                         sec_54={} gw={}",
+                        p.stop_marker(),
+                        p.page_const(),
+                        p.sec_54_count(),
+                        p.gw_size()
+                    );
+                }
                 // the `.g` grammar graph (structural decode) + `.gw` weights
                 if let Some(g) = &idx.graph {
                     let head: Vec<String> = g
@@ -1079,7 +1118,9 @@ pub fn main_cli() {
                  lmu.voc (афікси, суфікси/кінцівки, двозначники, таблиця секцій) — \
 v0.17.0; записники lmu.voc (FUN_10004230 record-walker: кордони record-ів + \
 block-resync packed B-tree) — v0.18.0; граф lmu.g — структурно декодовано, \
-                 семантика ребер + join word→.vt-посилань — далі (v0.19.0). \
+v0.19.0: точний stem-join word→.vt (posting record stream lmur.vt + header \
+                 lmur.m + параметри lmu.voc @0x80); семантика ребер lmu.g + \
+                 B-tree-VM хвоста (FUN_100019f0) — далі (v0.20). \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())
@@ -1128,6 +1169,27 @@ block-resync packed B-tree) — v0.18.0; граф lmu.g — структурно
             }
             if !r.matched.is_empty() {
                 println!("  збіг: {}", r.matched.join(", "));
+            }
+            // v0.19.0: the exact stem join — the case-folded Latin
+            // candidates of the terms matched in the `.vt` record stream
+            if !r.joined.is_empty() {
+                println!(
+                    "  join word→.vt (v0.19.0, точний stem-join): {} record-ів:",
+                    r.joined.len()
+                );
+                for (cand, off, u16s) in r.joined.iter().take(12) {
+                    let shown: Vec<String> =
+                        u16s.iter().take(8).map(|u| u.to_string()).collect();
+                    println!(
+                        "    «{cand}» → record @0x{off:x} ({} u16: {}{})",
+                        u16s.len(),
+                        shown.join(" "),
+                        if u16s.len() > 8 { "…" } else { "" }
+                    );
+                }
+                if r.joined.len() > 12 {
+                    println!("    … (ще {})", r.joined.len() - 12);
+                }
             }
             if r.docs.is_empty() {
                 println!(

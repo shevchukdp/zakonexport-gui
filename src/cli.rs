@@ -1021,12 +1021,42 @@ pub fn main_cli() {
                         );
                     }
                 }
+                // the `.g` grammar graph (structural decode) + `.gw` weights
+                if let Some(g) = &idx.graph {
+                    let head: Vec<String> = g
+                        .stream_head
+                        .iter()
+                        .take(8)
+                        .map(|v| format!("{v:04x}"))
+                        .collect();
+                    let (gw_n, gw_flag) = (idx.gw_u16.len(), {
+                        idx.gw_u16.iter().filter(|v| *v & 0x8000 != 0).count()
+                    });
+                    println!(
+                        "lmu.g граф: lang={} template={} stream@0x{:x} ({} u16) · \
+                         маркери: {} · lmu.gw: {} u16 ({} прап. 0x8000)",
+                        g.language,
+                        g.template,
+                        g.stream_off,
+                        g.stream_u16,
+                        if g.tail_markers.is_empty() {
+                            "—".to_string()
+                        } else {
+                            g.tail_markers.join(" ")
+                        },
+                        gw_n,
+                        gw_flag
+                    );
+                    println!("  граф head: {}…", head.join(" "));
+                }
             }
             println!();
             println!(
                 "Пошук нативним індексом — tsearch (експеримент); морфологія \
                  lmu.voc (афікси, суфікси/кінцівки, двозначники, таблиця секцій) — \
-v0.17.0; точні word→postings кордони (packed B-tree) — далі. \
+v0.17.0; граф lmu.g (заголовок + u16-потік + маркери POINT1/POINT2/STEP/ \
+REPEAT) — структурно декодовано, семантика ребер + точні word→postings кордони \
+(packed B-tree) — далі (v0.18.0). \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

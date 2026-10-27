@@ -418,6 +418,9 @@ pub struct TridentIndex {
     /// the decoded `.voc` morphology tables (section table, affixes, suffix
     /// endings, digitraphs, list counts) — `None` when the `.voc` is absent
     pub morphology: Option<crate::trident_voc::Morphology>,
+    /// the structurally decoded `.g` grammar graph (header + stream
+    /// fingerprint) — `None` when `lmu.g` is absent
+    pub graph: Option<crate::g_graph::GGraph>,
     pub inventory: Vec<InventoryFile>,
 }
 
@@ -483,6 +486,8 @@ impl TridentIndex {
         let gw_u16 = read("lmu.gw").as_deref().map(read_gw_u16).unwrap_or_default();
         // the exact `.voc` section table + morphology tables (v0.17.0)
         let morphology = crate::trident_voc::Morphology::parse(&voc);
+        // the `.g` grammar graph (structural decode: header + stream fingerprint)
+        let graph = read("lmu.g").as_deref().and_then(crate::g_graph::GGraph::parse);
 
         let inventory: Vec<InventoryFile> = INVENTORY
             .iter()
@@ -501,6 +506,7 @@ impl TridentIndex {
             vt_u16,
             gw_u16,
             morphology,
+            graph,
             inventory,
         })
     }
@@ -941,6 +947,7 @@ mod tests {
             vt_u16: vec![1, 2, 0, 3, 4, 5, 6, 7],
             gw_u16: Vec::new(),
             morphology: None,
+            graph: None,
             inventory: Vec::new(),
         };
         let r = idx.search("а0"); // encodes to [0xA4, 0x30] — no match

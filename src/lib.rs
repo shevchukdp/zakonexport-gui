@@ -12,6 +12,7 @@ pub mod db;
 pub mod mdconv;
 pub mod fields;
 pub mod ftsearch;
+pub mod g_graph;
 pub mod gui;
 pub mod highlight;
 pub mod naming;

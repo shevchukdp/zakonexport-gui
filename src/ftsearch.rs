@@ -72,13 +72,13 @@ impl FtResult {
 
 /// Lower-case letter → base-codepage byte (lower slots). Digits are stored
 /// verbatim. `None` for characters the base codepage does not define
-/// (Latin, lower `є`/`ґ`, …) — those are excluded from the encoded query and
-/// count against coverage.
+/// (Latin, …) — those are excluded from the encoded query and count against
+/// coverage.
 fn lower_byte(c: char) -> Option<u8> {
     if c.is_ascii_digit() {
         return Some(c as u8);
     }
-    const LOWER: [(char, u8); 34] = [
+    const LOWER: [(char, u8); 36] = [
         ('а', 0xE0), ('б', 0xE1), ('в', 0xE2), ('г', 0xE3), ('д', 0xE4),
         ('е', 0xE5), ('ж', 0xE6), ('з', 0xE7), ('и', 0xE8), ('й', 0xE9),
         ('к', 0xEA), ('л', 0xEB), ('м', 0xEC), ('н', 0xED), ('о', 0xEE),
@@ -90,7 +90,12 @@ fn lower_byte(c: char) -> Option<u8> {
         // Ukrainian overrides (base-specific; і/ї confirmed)
         ('і', 0xB3),
         ('ї', 0xBF),
-        // TODO(v0.17.0): lower є / ґ slots (rare in the base)
+        // є: confirmed at 0xBA by an .mb scan — the words «застосується» and
+        // «затверджується» only match with the є-position byte = 0xBA
+        ('є', 0xBA),
+        // ґ: the base stores «загальний» etc. with the hard-г slot (0xE3);
+        // fold ґ onto 0xE3 so Ukrainian query spellings still match
+        ('ґ', 0xE3),
     ];
     LOWER.iter().find(|(ch, _)| *ch == c).map(|(_, b)| *b)
 }
@@ -100,7 +105,7 @@ fn upper_byte(c: char) -> Option<u8> {
     if c.is_ascii_digit() {
         return Some(c as u8);
     }
-    const UPPER: [(char, u8); 34] = [
+    const UPPER: [(char, u8); 36] = [
         ('А', 0xC0), ('Б', 0xC1), ('В', 0xC2), ('Г', 0xC3), ('Д', 0xC4),
         ('Е', 0xC5), ('Ж', 0xC6), ('З', 0xC7), ('И', 0xC8), ('Й', 0xC9),
         ('К', 0xCA), ('Л', 0xCB), ('М', 0xCC), ('Н', 0xCD), ('О', 0xCE),
@@ -112,7 +117,13 @@ fn upper_byte(c: char) -> Option<u8> {
         // Ukrainian overrides (base-specific; І/Є confirmed)
         ('І', 0xB2),
         ('Є', 0xAA),
-        // TODO(v0.17.0): upper Ї / Ґ slots (rare in the base)
+        // Ґ: the base stores title-case «Г…» with the hard-Г slot (0xC3);
+        // fold Ґ onto 0xC3 so Ukrainian query spellings still match
+        ('Ґ', 0xC3),
+        // Ї: no dedicated upper slot was found in the base — possessives
+        // («їхніх» …) are stored with the lower ї byte; fold the title-case
+        // query onto 0xBF
+        ('Ї', 0xBF),
     ];
     UPPER.iter().find(|(ch, _)| *ch == c).map(|(_, b)| *b)
 }
@@ -288,6 +299,48 @@ mod tests {
         assert_eq!(upper_byte('І'), Some(0xB2));
         assert_eq!(upper_byte('Є'), Some(0xAA));
         assert_eq!(lower_byte('ї'), Some(0xBF));
+        // confirmed by an .mb scan: «застосується» / «затверджується»
+        assert_eq!(lower_byte('є'), Some(0xBA));
+        // ґ/ґ fold onto the hard-г / hard-Г slots the base actually stores
+        assert_eq!(lower_byte('ґ'), Some(0xE3), "lower ґ folds onto г");
+        assert_eq!(upper_byte('Ґ'), Some(0xC3), "upper Ґ folds onto Г");
+        // Ї folds onto the stored lower-ї byte (no dedicated upper slot)
+        assert_eq!(upper_byte('Ї'), Some(0xBF), "upper Ї folds onto ї");
+    }
+
+    #[test]
+    fn zahalnyi_encodes_with_folded_g() {
+        // «загальний» is stored in the base with the hard-г byte; querying it
+        // with the soft ґ must encode to the same byte run
+        let (b, e, t) = encode_term("загальний", false);
+        assert_eq!((e, t), (9, 9), "fully encodable");
+        assert_eq!(
+            b,
+            vec![0xE7, 0xE0, 0xE3, 0xE0, 0xEB, 0xFC, 0xED, 0xE8, 0xE9]
+        );
+        // title-case first letter folds onto the hard-Г slot
+        let (bt, et, tt) = encode_term("Загальний", true);
+        assert_eq!((et, tt), (9, 9));
+        // З (first, title) -> 0xC7; the 3rd-letter ґ stays in the lower fold
+        // slot 0xE3
+        assert_eq!(
+            bt,
+            vec![0xC7, 0xE0, 0xE3, 0xE0, 0xEB, 0xFC, 0xED, 0xE8, 0xE9]
+        );
+    }
+
+    #[test]
+    fn zastosuye_tsya_encodes_confirmed_ye() {
+        // «застосується» — the є-position must encode to the confirmed 0xBA
+        let (b, e, t) = encode_term("застосується", false);
+        assert_eq!((e, t), (12, 12), "fully encodable");
+        assert_eq!(
+            b,
+            vec![
+                0xE7, 0xE0, 0xF1, 0xF2, 0xEE, 0xF1, 0xF3, 0xBA, 0xF2, 0xFC,
+                0xF1, 0xFF
+            ]
+        );
     }
 
     #[test]

@@ -973,12 +973,60 @@ pub fn main_cli() {
                     vt_min.map(|x| x.to_string()).unwrap_or("-".into()),
                     vt_max.map(|x| x.to_string()).unwrap_or("-".into()),
                 );
+                // the exact .voc morphology tables (v0.17.0)
+                if let Some(m) = &idx.morphology {
+                    let t = &m.table;
+                    println!(
+                        "lmu.voc секції: root=0x{:x} listA=0x{:x}({}) listB=0x{:x}({}) \
+                         f-записи=0x{:x}({}) суфікси=0x{:x}",
+                        t.root,
+                        t.list_a,
+                        m.list_a_count,
+                        t.list_b,
+                        m.list_b_count,
+                        t.per_word_f,
+                        m.per_word_f_count,
+                        t.suffixes,
+                    );
+                    if !m.affixes.is_empty() {
+                        let affixes: Vec<String> = m
+                            .affixes
+                            .iter()
+                            .map(|w| format!("{}({})", w.text(), w.class))
+                            .collect();
+                        println!(
+                            "  афікси ({}): {}",
+                            m.affixes.len(),
+                            affixes.join(", ")
+                        );
+                    }
+                    if !m.suffixes.is_empty() {
+                        let shown: Vec<String> = m
+                            .suffixes
+                            .iter()
+                            .take(12)
+                            .map(|w| crate::trident_voc::lm_word_display(w))
+                            .collect();
+                        println!(
+                            "  суфікси/кінцівки ({}): {}…",
+                            m.suffixes.len(),
+                            shown.join(", ")
+                        );
+                    }
+                    if !m.digraphs.is_empty() {
+                        println!(
+                            "  двозначники ({}): {}",
+                            m.digraphs.len(),
+                            m.digraphs.join(", ")
+                        );
+                    }
+                }
             }
             println!();
             println!(
-                "Пошук нативним індексом — tsearch (експеримент); повна \
-                 таблиця знаків (cp1251-порядок, укл. і/ї) — v0.14.0; морфологія (.g/.gw) \
-та точні word→postings кордони — далі. \
+                "Пошук нативним індексом — tsearch (експеримент); морфологія \
+                 lmu.voc (афікси, суфікси/кінцівки, двозначники, таблиця секцій) — \
+v0.17.0; точні word→postings кордони (packed B-tree) — далі. \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

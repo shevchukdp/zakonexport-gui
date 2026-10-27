@@ -21,6 +21,7 @@ pub mod printdoc;
 pub mod render;
 pub mod signal;
 pub mod trident;
+pub mod trident_voc;
 pub mod update;
 pub mod writers;
 

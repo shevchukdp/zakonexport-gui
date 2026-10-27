@@ -415,6 +415,9 @@ pub struct TridentIndex {
     pub vt_u16: Vec<u16>,
     /// the morphology weight table from `.gw` (raw u16, 0x8000 flag bit)
     pub gw_u16: Vec<u16>,
+    /// the decoded `.voc` morphology tables (section table, affixes, suffix
+    /// endings, digitraphs, list counts) — `None` when the `.voc` is absent
+    pub morphology: Option<crate::trident_voc::Morphology>,
     pub inventory: Vec<InventoryFile>,
 }
 
@@ -478,6 +481,8 @@ impl TridentIndex {
         let vt_u16 = read_vt_u16(&vt);
         // optional morphology weight table (lmu.gw) — structural decode only
         let gw_u16 = read("lmu.gw").as_deref().map(read_gw_u16).unwrap_or_default();
+        // the exact `.voc` section table + morphology tables (v0.17.0)
+        let morphology = crate::trident_voc::Morphology::parse(&voc);
 
         let inventory: Vec<InventoryFile> = INVENTORY
             .iter()
@@ -495,6 +500,7 @@ impl TridentIndex {
             dict_words,
             vt_u16,
             gw_u16,
+            morphology,
             inventory,
         })
     }
@@ -934,6 +940,7 @@ mod tests {
             dict_words: vec![vec![0xE1, 0xA0, 0x30]], // "са0"
             vt_u16: vec![1, 2, 0, 3, 4, 5, 6, 7],
             gw_u16: Vec::new(),
+            morphology: None,
             inventory: Vec::new(),
         };
         let r = idx.search("а0"); // encodes to [0xA4, 0x30] — no match

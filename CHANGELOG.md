@@ -16,6 +16,84 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.17.0 — 2026-10-27
+
+### UK
+- **Точна `.voc`-таблиця секцій + морфологічні таблиці** (нова
+  `src/trident_voc.rs`, підключена до `TridentIndex.morphology` +
+  CLI-дієслово `trident`):
+  - `VocSectionTable` — 17 u32-записів @0x3C (підтверджено
+  по-байтовому в `lmu.voc`): root=`0x6832F`, listA=`0x68368`
+  (722 записів), listB=`0x6CA96` (2157), f-записи=`0x75253` (142),
+  суфікси=`0x76714` (722), афікси=`0x765B2` (7), таблиця 33 слів
+  `0x765E1`, двозначники `0x7668F` (у lmu.voc порожня);
+  - **opcode-VM, довжина в БАЙТАХ** (розбирання `lmsup32.dll`
+  Ghidra-12.1): `vm_program_byte_len` (`FUN_100044f0`, u16-потік,
+  depth-лічильник `0x1001`/`0x1002`), `vm_record_scan_len`
+  (`FUN_100044c0`, +скан до першого `0xFF`), `vm_record_len`
+  (`FUN_100044a0`, `L + 3*count + 1`);
+  - **морфологія lmu.voc декодована**: 7 афіксів
+  (`най(1), по-(3), по(4), не(2), спів(6), анти(5), псевдо(5)`),
+  722 суфікси/кінцівки (у т.ч. дефісними «ам-», «і-»), подвійний
+  NUL-термінатор записів; «конституція» як сирі LmCode-байти в
+  lmu.voc **не існує** (лише в щільному B-tree) — доведено;
+  - `lm_word_display` — показ слів таблиць (дефіс, `!`-маркери,
+    LmCode-літери) без `·2d·`.
+- **Кодувальник бази докодовано** (`src/ftsearch.rs`):
+  - **`є` = `0xBA`** — підтверджено сканом `.mb`: слова
+    «застосується» (29 збігів) і «затверджується» (34)
+    збігаються лише з байтом `0xBA` у позиції є;
+  - `ґ`/`Ґ` складаються в слоти твердого **г/Г (`0xE3`/`0xC3`)** —
+    база зберігає «загальний» саме так; `Ї` — в збережений
+    нижній `ї` (`0xBF`) (присвійні в базі — нижнім реєстром);
+  - **drift 222/223 оракула документовано**: 204/223 офсетів
+    збігаються точно; 19 офсетів оракула з'їхали (слова в
+    `758.mb` 198873→199101, `177.mb` +311, `words.mb` перебудовано)
+    + 18 нових позицій — механізм точного слова **правильний**,
+    223/223 на поточній базі недосяжний (снимок оракула старіший).
+- 100 юніт-тестів (нові: `trident_voc::tests::{…}` ×7 +
+  `ftsearch::tests::{zahalnyi_…, zastosuye_tsya_…}`).
+
+### EN
+- **Exact `.voc` section table + morphology tables** (new
+  `src/trident_voc.rs`, wired into `TridentIndex.morphology` +
+  the `trident` CLI verb):
+  - `VocSectionTable` — 17 u32 entries @0x3C (verified byte-by-byte
+    in `lmu.voc`): root=`0x6832F`, listA=`0x68368` (722 records),
+    listB=`0x6CA96` (2157), f-records=`0x75253` (142),
+    suffixes=`0x76714` (722), affixes=`0x765B2` (7), 33-word table
+    `0x765E1`, digraphs `0x7668F` (empty in lmu.voc);
+  - **opcode-VM byte-length functions** (disassembled
+    `lmsup32.dll` with Ghidra 12.1): `vm_program_byte_len`
+    (`FUN_100044f0`, u16 stream, `0x1001`/`0x1002` depth
+    counter), `vm_record_scan_len` (`FUN_100044c0`, +scan to the
+    first `0xFF`), `vm_record_len` (`FUN_100044a0`,
+    `L + 3*count + 1`);
+  - **lmu.voc morphology decoded**: 7 affixes
+    (`най(1), po-(3), po(4), не(2), спів(6), анти(5), псевдо(5)`),
+    722 suffix/endings (incl. hyphenated «ам-», «і-»), the double
+    NUL record terminator; «конституція» as raw LmCode bytes does
+    **not exist** in lmu.voc (packed B-tree only) — proven;
+  - `lm_word_display` — table-word rendering (hyphens, `!` markers,
+    LmCode letters) without `·2d·` placeholders.
+- **Base codepage completed** (`src/ftsearch.rs`):
+  - **`є` = `0xBA`** — confirmed by an `.mb` scan: the words
+    «застосується» (29 hits) and «затверджується» (34) match only
+    with `0xBA` in the є-position;
+  - `ґ`/`Ґ` fold onto the hard-г/Г slots (`0xE3`/`0xC3`) — the base
+    stores «загальний» that way; `Ї` folds onto the stored lower
+    `ї` (`0xBF`) (possessives are stored lower-case);
+  - **the 222/223 oracle drift is documented**: 204/223 offsets
+    match exactly; 19 oracle offsets drifted (a `758.mb` word moved
+    198873→199101, `177.mb` +311, `words.mb` rebuilt) + 18 new
+    positions — the exact-word mechanism is **correct**, 223/223 is
+    not reachable on the current base (the oracle snapshot is
+    older).
+- 100 unit tests (new: `trident_voc::tests::{…}` ×7 +
+  `ftsearch::tests::{zahalnyi_…, zastosuye_tsya_…}`).
+
+---
+
 ## v0.16.0 — 2026-10-27
 
 ### UK

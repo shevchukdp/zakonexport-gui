@@ -1020,6 +1020,29 @@ pub fn main_cli() {
                             m.digraphs.join(", ")
                         );
                     }
+                    // the FUN_10004230 record walks (v0.18.0): per-section
+                    // record counts, landing offsets and resync jumps
+                    if !m.walks.is_empty() {
+                        println!(
+                            "  записники (FUN_10004230, блок {}):",
+                            crate::trident_voc::WALK_BLOCK
+                        );
+                        for (slot, w) in &m.walks {
+                            let mode = match crate::trident_voc::section_mode(*slot) {
+                                Some(0xff) => "ff".to_string(),
+                                Some(m) => (m as char).to_string(),
+                                None => "?".to_string(),
+                            };
+                            println!(
+                                "    +{slot:02x} '{mode}' @0x{:x}: {} записів → 0x{:x} \
+                                 ({} block-resync)",
+                                m.table.slot_offset(*slot),
+                                w.count,
+                                w.landed,
+                                w.block_jumps
+                            );
+                        }
+                    }
                 }
                 // the `.g` grammar graph (structural decode) + `.gw` weights
                 if let Some(g) = &idx.graph {
@@ -1054,9 +1077,9 @@ pub fn main_cli() {
             println!(
                 "Пошук нативним індексом — tsearch (експеримент); морфологія \
                  lmu.voc (афікси, суфікси/кінцівки, двозначники, таблиця секцій) — \
-v0.17.0; граф lmu.g (заголовок + u16-потік + маркери POINT1/POINT2/STEP/ \
-REPEAT) — структурно декодовано, семантика ребер + точні word→postings кордони \
-(packed B-tree) — далі (v0.18.0). \
+v0.17.0; записники lmu.voc (FUN_10004230 record-walker: кордони record-ів + \
+block-resync packed B-tree) — v0.18.0; граф lmu.g — структурно декодовано, \
+                 семантика ребер + join word→.vt-посилань — далі (v0.19.0). \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

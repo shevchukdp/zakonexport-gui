@@ -46,6 +46,53 @@
 //! after the top-level `0x1002`. `vm_record_len` is `FUN_100044a0` =
 //! `L + 3 * *(byte at L) + 1`, where `L = vm_record_scan_len` (the program length
 //! plus the trailing byte scan up to a `0xFF` marker, per `FUN_100044c0`).
+//!
+//! ## The record walker
+//!
+//! `FUN_10004230(handle, section_off, mode)` walks a section's records and
+//! returns a compact NUL-terminated array of record **file offsets** (the
+//! pointer array the engine later consumes). Each section starts with a u16
+//! record count; per record the DLL computes a mode-specific byte length,
+//! then advances:
+//!
+//! - if the byte right after the record is NUL (the record's double-NUL
+//!   terminator), the next record starts at `start + len + 1`;
+//! - otherwise the walker **resynchronizes to the next block boundary**:
+//!   `next = (start / block + 1) * block` (`block` = `FUN_10021940()` = the
+//!   file-I/O layer's buffer size, `DAT_1002ad98`; the write site is not in
+//!   the decompilation — 512 is the likely value, and the verified landings
+//!   are block-size-independent for 128..=4096).
+//!
+//! The block jumps are the packed B-tree resync: the listA/listB node
+//! regions are densely packed, and a node that does not end in a double
+//! NUL means the next node starts on the next block boundary.
+//!
+//! Modes (the `param_3` byte of `FUN_10004230`), with their record-length
+//! functions:
+//!
+//! - `'n'` (`0x6e`, `record_len_n`) — a NUL-terminated byte run (LmCode
+//!   words). The DLL's scanner advances a `short*` **one byte at a time**
+//!   (the `(short *)((int)p + 1)` idiom) and stops at the first `0x00`;
+//!   length = index + 1.
+//! - `'f'` (`0x66`, `vm_record_len` / `FUN_100044a0`) — the opcode-VM
+//!   program + `0xFF` marker + `3*count` byte trailer.
+//! - `0xff` (`record_len_ffff` / `FUN_10004210`) — a u16 stream terminated
+//!   by `0xFFFF`; the length includes the terminator.
+//! - `'e'` (`0x65`, `record_len_e` / `FUN_100041d0`) — a byte VM starting at
+//!   record offset 2: `J` takes 1 extra operand byte, `F`/`G`/`C`/`E` take
+//!   2, other bytes none; the walk stops at `0xFF` (included in the length).
+//!
+//! Section → mode map (from the `FUN_100032d0` loader's calls): `+0x48` →
+//! `'f'`, `+0x58` → `0xff`, `+0x4C`/`+0x50`/`+0x54`/`+0x60`/`+0x68`/`+0x6C`/
+//! `+0x70` (and empirically `+0x64`, read by a separate consumer) → `'n'`,
+//! `+0x5C` → a raw seek (no record walk), `+0x3C`/`+0x40`/`+0x44` → the
+//! B-tree index consumed by the search code (outside the loader's walks).
+//!
+//! Verified against the real `lmu.voc` (block = 512): `f` @ `0x75253`
+//! (142 records) lands exactly on `0x764c5`; `0xff` @ `0x764c5` (12) on
+//! `0x765b1`; the affixes @ `0x765b2` (7) on `0x765e1`; the 33-word table
+//! @ `0x765e1` on `0x7667a`; the suffixes @ `0x76714` (722) on `0x77b78` —
+//! every one of them the *next* section's table offset, exact.
 
 use crate::trident::{lm_byte_to_char, LM_CHAR_TABLE};
 
@@ -163,6 +210,31 @@ impl VocSectionTable {
     pub fn dual_selector(&self, field: u32) -> u16 {
         u16::try_from((field >> 16) & 0xFFFF).unwrap_or(0)
     }
+
+    /// Read a table slot by its header offset (e.g. `0x48` → the per-word
+    /// `'f'` section) as a file offset (`0` = the section is absent).
+    pub fn slot_offset(&self, slot: u32) -> u32 {
+        match slot {
+            0x3c => self.root,
+            0x40 => self.list_a,
+            0x44 => self.list_b,
+            0x48 => self.per_word_f,
+            0x4c => self.suffixes,
+            0x50 => self.sec_50,
+            0x54 => self.sec_54,
+            0x58 => self.sec_58,
+            0x5c => self.sec_5c,
+            0x60 => self.affixes,
+            0x64 => self.sec_64,
+            0x68 => self.sec_68,
+            0x6c => self.sec_6c,
+            0x70 => self.sec_70,
+            0x74 => self.dual_74,
+            0x78 => self.dual_78,
+            0x7c => self.dual_7c,
+            _ => 0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +305,175 @@ pub fn vm_record_len(rec: &[u8]) -> Option<usize> {
     } else {
         Some(total)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The record walker (`FUN_10004230`)
+// ---------------------------------------------------------------------------
+
+/// `'n'` walk mode (the `0x6e` byte of `FUN_10004230`).
+pub const REC_MODE_N: u8 = b'n';
+/// `'e'` walk mode (the `0x65` byte of `FUN_10004230`).
+pub const REC_MODE_E: u8 = b'e';
+/// `'f'` walk mode (the `0x66` byte of `FUN_10004230`).
+pub const REC_MODE_F: u8 = b'f';
+/// `0xff` walk mode (the u16 stream terminated by `0xFFFF`).
+pub const REC_MODE_FFFF: u8 = 0xFF;
+
+/// The block-resync size for [`walk_section_records`]: the DLL takes it from
+/// `FUN_10021940()` (the file-I/O layer's buffer size, `DAT_1002ad98`, whose
+/// write site is not in the decompilation). 512 is the likely value; the
+/// verified section landings are identical for every block size in
+/// 128..=4096, so the walk is robust to the exact choice.
+pub const WALK_BLOCK: u32 = 512;
+
+/// `FUN_10004230` `'n'` mode: a NUL-terminated byte run (LmCode words). The
+/// DLL's scanner advances one byte at a time and stops at the first `0x00`;
+/// the length is that index + 1 (the NUL included).
+pub fn record_len_n(rec: &[u8]) -> usize {
+    match rec.iter().position(|&b| b == 0x00) {
+        Some(i) => i + 1,
+        None => rec.len(),
+    }
+}
+
+/// `FUN_10004210` (`0xff` mode): a u16 stream terminated by `0xFFFF`; the
+/// length includes the terminator u16.
+pub fn record_len_ffff(rec: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i + 2 <= rec.len() {
+        if u16::from_le_bytes([rec[i], rec[i + 1]]) == 0xFFFF {
+            return i + 2;
+        }
+        i += 2;
+    }
+    rec.len()
+}
+
+/// `FUN_100041d0` (`'e'` mode): a byte VM over the record starting at offset
+/// 2 (the first 2 bytes are the record's header). `J` takes 1 extra operand
+/// byte; `F`/`G`/`C`/`E` take 2; any other byte takes none. The walk stops
+/// at `0xFF`, which is included in the returned length.
+pub fn record_len_e(rec: &[u8]) -> usize {
+    let mut i = 2usize;
+    while i < rec.len() && rec[i] != 0xFF {
+        let extra = match rec[i] {
+            b'J' => 1,
+            b'F' | b'G' | b'C' | b'E' => 2,
+            _ => 0,
+        };
+        i += 1 + extra;
+    }
+    if i < rec.len() {
+        i + 1
+    } else {
+        rec.len()
+    }
+}
+
+/// The record length for a walk mode (the `FUN_10004230` match arms). An
+/// unknown mode returns the whole record (the walk then resynchronizes via
+/// the block boundary).
+pub fn record_len(rec: &[u8], mode: u8) -> usize {
+    match mode {
+        REC_MODE_N => record_len_n(rec),
+        REC_MODE_E => record_len_e(rec),
+        REC_MODE_F => vm_record_len(rec).unwrap_or(rec.len()),
+        REC_MODE_FFFF => record_len_ffff(rec),
+        _ => rec.len(),
+    }
+}
+
+/// The result of walking one section's records: the record start offsets
+/// (the DLL walker's pointer array) plus the landing offset after the last
+/// record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SectionWalk {
+    /// the u16 record count read from the section header
+    pub count: u16,
+    /// each record's start file offset (what `FUN_10004230` returns)
+    pub starts: Vec<u32>,
+    /// the block-resync jumps taken (records that did not end in a double
+    /// NUL — the packed B-tree regions)
+    pub block_jumps: u32,
+    /// the offset after the last record; may lie past the file end when the
+    /// final record resynchronizes off the end
+    pub landed: u32,
+}
+
+/// `FUN_10004230` — walk the `count` records of a section and return their
+/// start offsets + the landing offset.
+///
+/// Advance rule (mirroring the decompiled loader): `len` is the mode's
+/// record length (bounded by the file end); when the byte at `start + len`
+/// is NUL the next record starts at `start + len + 1` (the double-NUL
+/// terminator), otherwise the walker jumps to the next `block` boundary:
+/// `(start / block + 1) * block`.
+pub fn walk_section_records(voc: &[u8], off: u32, mode: u8, block: u32) -> SectionWalk {
+    let o = off as usize;
+    if o + 2 > voc.len() || block == 0 {
+        return SectionWalk::default();
+    }
+    let count = u16_from(voc, off);
+    let block = block as usize;
+    let mut p = o + 2;
+    let mut starts = Vec::with_capacity(count as usize);
+    let mut jumps = 0u32;
+    for _ in 0..count as u32 {
+        if p >= voc.len() {
+            break;
+        }
+        starts.push(p as u32);
+        let rec = &voc[p..];
+        let len = record_len(rec, mode).min(rec.len());
+        if p + len < voc.len() && voc[p + len] == 0x00 {
+            p += len + 1;
+        } else {
+            jumps += 1;
+            p = ((p / block) + 1) * block;
+        }
+    }
+    SectionWalk {
+        count,
+        starts,
+        block_jumps: jumps,
+        landed: p as u32,
+    }
+}
+
+/// Section slot (header offset) → record-walk mode, mirroring the
+/// `FUN_100032d0` loader: `+0x48` → `'f'`, `+0x58` → `0xff`,
+/// `+0x4C`/`+0x50`/`+0x54`/`+0x60`/`+0x68`/`+0x6C`/`+0x70` → `'n'`. The
+/// `+0x64` 33-word table is read by a separate consumer, but a `'n'` walk
+/// of it lands exactly on the next section (`0x7667a`) — included. `+0x5C`
+/// is a raw seek, `+0x3C`/`+0x40`/`+0x44` are the B-tree index.
+pub fn section_mode(slot: u32) -> Option<u8> {
+    match slot {
+        0x48 => Some(REC_MODE_F),
+        0x58 => Some(REC_MODE_FFFF),
+        0x4c | 0x50 | 0x54 | 0x60 | 0x64 | 0x68 | 0x6c | 0x70 => Some(REC_MODE_N),
+        _ => None,
+    }
+}
+
+/// Walk every walkable section of `table` (see [`section_mode`]) with the
+/// DLL's advance rule. Returns `(slot, walk)` pairs in slot order.
+pub fn walk_sections(voc: &[u8], table: &VocSectionTable, block: u32) -> Vec<(u32, SectionWalk)> {
+    const SLOTS: [u32; 10] = [
+        0x48, 0x4c, 0x50, 0x54, 0x58, 0x60, 0x64, 0x68, 0x6c, 0x70,
+    ];
+    let mut out = Vec::new();
+    for &slot in &SLOTS {
+        let Some(mode) = section_mode(slot) else {
+            continue;
+        };
+        let off = table.slot_offset(slot);
+        if off == 0 {
+            continue;
+        }
+        out.push((slot, walk_section_records(voc, off, mode, block)));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +571,9 @@ pub struct Morphology {
     pub list_b_count: u16,
     /// the per-word `'f'` record count (section `+0x48`)
     pub per_word_f_count: u16,
+    /// the `FUN_10004230` record walks of every walkable section
+    /// (`(slot, walk)`, block = [`WALK_BLOCK`])
+    pub walks: Vec<(u32, SectionWalk)>,
 }
 
 impl Morphology {
@@ -383,6 +627,7 @@ impl Morphology {
         } else {
             0
         };
+        let walks = walk_sections(voc, &table, WALK_BLOCK);
         Some(Morphology {
             table,
             affixes,
@@ -392,6 +637,7 @@ impl Morphology {
             list_a_count,
             list_b_count,
             per_word_f_count,
+            walks,
         })
     }
 
@@ -537,6 +783,145 @@ mod tests {
         assert_eq!(m.list_a_count, 722, "listA records");
         assert_eq!(m.list_b_count, 2157, "listB records");
         assert_eq!(m.per_word_f_count, 142, "per-word 'f' records");
+    }
+
+    #[test]
+    fn record_len_n_stops_at_the_first_nul() {
+        // LmCode «ам-» + NUL: the first NUL is at index 3 → length 4
+        assert_eq!(record_len_n(&[0xA0, 0xAC, 0x2d, 0x00, 0x00]), 4);
+        // no NUL in sight: the whole input
+        assert_eq!(record_len_n(&[0xA0, 0xAC, 0x2d]), 3);
+        // an empty input stays empty
+        assert_eq!(record_len_n(&[]), 0);
+    }
+
+    #[test]
+    fn record_len_ffff_includes_the_terminator_u16() {
+        // two data u16s then the 0xFFFF terminator: length 6
+        let rec = [0x11, 0x00, 0x22, 0x00, 0xFF, 0xFF];
+        assert_eq!(record_len_ffff(&rec), 6);
+        // an odd tail without the terminator: the whole input
+        assert_eq!(record_len_ffff(&[0x11, 0x00, 0x22]), 3);
+    }
+
+    #[test]
+    fn record_len_e_walks_the_byte_vm() {
+        // record: 2-byte header + J (1 operand) + data + 0xFF at index 5
+        let rec: [u8; 6] = [0x00, 0x00, b'J', 0x07, 0x00, 0xFF];
+        // i=2: J → i += 2 → 4; rec[4] != 0xFF → i += 1 → 5; rec[5] == 0xFF → 5 + 1
+        assert_eq!(record_len_e(&rec), 6);
+        // F takes 2 operand bytes: i=2 → F → i=5; data; 0xFF at 6 → 7
+        let rec2: [u8; 7] = [0x00, 0x00, b'F', 0x01, 0x02, 0x00, 0xFF];
+        assert_eq!(record_len_e(&rec2), 7);
+        // an under-2-byte header falls back to the whole input
+        assert_eq!(record_len_e(&[0x00]), 1);
+    }
+
+    #[test]
+    fn record_len_dispatches_by_mode() {
+        let rec: [u8; 6] = [0x11, 0x00, 0x22, 0x00, 0xFF, 0xFF];
+        assert_eq!(record_len(&rec, REC_MODE_FFFF), 6);
+        assert_eq!(record_len(&[0xA0, 0xAC, 0x00], REC_MODE_N), 3);
+        assert_eq!(record_len(&[0x02, 0x10, 0x00, 0x00], REC_MODE_F), 4);
+        // an unknown mode: the whole record (resync via the block boundary)
+        assert_eq!(record_len(&[0x00, 0x01, 0x02], 0x42), 3);
+    }
+
+    #[test]
+    fn walk_records_land_on_the_verified_section_boundaries() {
+        let Some(voc) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.voc").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        // the verified exact landings (the next section's table offset)
+        let cases: [(u32, u8, u16, u32); 6] = [
+            (0x75253, REC_MODE_F, 142, 0x764c5),
+            (0x764c5, REC_MODE_FFFF, 12, 0x765b1),
+            (0x765b2, REC_MODE_N, 7, 0x765e1),
+            (0x765e1, REC_MODE_N, 33, 0x7667a),
+            (0x76691, REC_MODE_N, 32, 0x76714),
+            (0x76714, REC_MODE_N, 722, 0x77b78),
+        ];
+        for (off, mode, count, landed) in cases {
+            let w = walk_section_records(&voc, off, mode, WALK_BLOCK);
+            assert_eq!(w.count, count, "count @ {off:#x}");
+            assert_eq!(w.landed, landed, "landing @ {off:#x} mode {mode}");
+            assert_eq!(w.starts.len(), count as usize, "starts @ {off:#x}");
+            assert_eq!(w.starts[0], off + 2, "first start @ {off:#x}");
+        }
+        // the packed B-tree lists: listA walks all 722 of its records and
+        // lands inside the file; the listB walk runs to the file end (only
+        // 819 of the header's 2157 records sit contiguously before EOF —
+        // the remaining nodes are reached through the root index, the
+        // still-blocked payload semantics) and resynchronizes just past
+        // the end.
+        let la = walk_section_records(&voc, 0x068368, REC_MODE_N, WALK_BLOCK);
+        assert_eq!(la.count, 722);
+        assert_eq!(la.starts.len(), 722, "listA walks all its records");
+        assert!(la.landed as usize <= voc.len(), "listA lands within the file");
+        let lb = walk_section_records(&voc, 0x06ca96, REC_MODE_N, WALK_BLOCK);
+        assert_eq!(lb.count, 2157);
+        assert_eq!(lb.starts.len(), 819, "listB walk stops at the file end");
+        assert_eq!(lb.landed, 0x78000, "listB resynchronizes off the end");
+    }
+
+    #[test]
+    fn walk_landings_are_block_size_independent() {
+        let Some(voc) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.voc").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        // the verified landings are identical for every block size in
+        // 128..=4096 (the single resync jump resynchronizes onto the next
+        // section's start regardless of the boundary size)
+        for (off, mode, landed) in [
+            (0x75253u32, REC_MODE_F, 0x764c5u32),
+            (0x76714u32, REC_MODE_N, 0x77b78u32),
+        ] {
+            for block in [128u32, 256, 512, 1024, 2048, 4096] {
+                let w = walk_section_records(&voc, off, mode, block);
+                assert_eq!(
+                    w.landed,
+                    landed,
+                    "landing @ {off:#x} mode {mode} block {block}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn morphology_walks_cover_the_walkable_slots() {
+        let Some(voc) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.voc").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let m = Morphology::parse(&voc).expect("morph");
+        // every non-absent walkable slot is walked (10 slots in lmu.voc)
+        assert_eq!(m.walks.len(), 10, "walks: {:?}", m.walks.len());
+        let slots: Vec<u32> = m.walks.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            slots,
+            vec![0x48, 0x4c, 0x50, 0x54, 0x58, 0x60, 0x64, 0x68, 0x6c, 0x70]
+        );
+        // the digraph section is empty (count 0): zero records, no jumps
+        let digraph = m
+            .walks
+            .iter()
+            .find(|(s, _)| *s == 0x70)
+            .expect("the digraph walk");
+        assert_eq!(digraph.1.count, 0);
+        assert!(digraph.1.starts.is_empty());
+    }
+
+    #[test]
+    fn section_mode_maps_the_loader_slots() {
+        assert_eq!(section_mode(0x48), Some(REC_MODE_F));
+        assert_eq!(section_mode(0x58), Some(REC_MODE_FFFF));
+        assert_eq!(section_mode(0x4c), Some(REC_MODE_N));
+        assert_eq!(section_mode(0x70), Some(REC_MODE_N));
+        // the raw-seek and B-tree slots are not walked by the loader
+        assert_eq!(section_mode(0x5c), None);
+        assert_eq!(section_mode(0x40), None);
     }
 
     #[test]

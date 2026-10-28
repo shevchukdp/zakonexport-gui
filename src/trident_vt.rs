@@ -493,6 +493,400 @@ impl VmPredicateTable {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v0.26.0: the `.m` section walker (roadmap v0.27.0)
+// ---------------------------------------------------------------------------
+
+/// The structural kind of one `.m` 16-slot table section (v0.26.0),
+/// classified empirically from the two real files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VmSectionKind {
+    /// `[u16 count][count u16 records]` and the section ends **exactly**
+    /// on the next table slot in file order (the u16 word table:
+    /// 0x37CB→0x39C9 ukr, 0x3001→0x3203 rus).
+    U16Records,
+    /// A count field in the head + NUL-terminated (or 2-byte pair)
+    /// records; the best-effort NUL walk lands *inside* or *past* the
+    /// next slot (the 0x206D / 0x1ACF predicate regions, the 0x339D
+    /// pair tables).
+    NulRecords,
+    /// The per-word 16-byte row block (slot 0: 0x1000 ukr / 0xC20 rus —
+    /// 64 rows / 51 rows; the `0xE` per-word rows of the predicate
+    /// machinery, structurally decoded here).
+    WordRows,
+    /// The u16-offset / `(u8 len, u8 flag)` key directory (slot 7:
+    /// 0x29D7 ukr / 0x25C1 rus — the packed B-tree key index).
+    LenFlagIndex,
+    /// A small fixed config block (span ≤ 64 B: the 0x88 registry,
+    /// 0xBCB / 0xBF3 ukr, 0xC09 / 0xC12 rus).
+    Small,
+    /// An opaque packed region (the B-tree 0x1405 / 0xF5D, the
+    /// row regions 0x244B / 0x3000 / 0x36EF, the sparse 0xBFC).
+    Packed,
+    /// The head did not classify.
+    Unknown,
+}
+
+/// One walkable `.m` section (roadmap v0.27.0 DoD: "every walkable
+/// section lands on the next table slot" — holds for the `U16Records`
+/// tables; the other kinds interleave with the packed B-tree region and
+/// land at the region end or the file tail, documented per kind).
+#[derive(Debug, Clone)]
+pub struct VmSectionWalk {
+    /// The table slot index (the slot whose value is `off`).
+    pub slot: u8,
+    /// The section start (the slot value).
+    pub off: u32,
+    /// The first 4 bytes as a u32 (the head fingerprint).
+    pub head_u32: u32,
+    pub kind: VmSectionKind,
+    /// The record count: the u16 count (U16Records / NulRecords), the
+    /// row count (WordRows), the `(len, flag)` pair count (LenFlagIndex),
+    /// 0 for Small / Packed / Unknown.
+    pub records: u32,
+    /// The offset after the last record (the DLL walker's `landed`).
+    pub landed: u32,
+    /// `landed == the next table slot in file order` (the tile
+    /// definition; only `U16Records` sections tile in the real files).
+    pub lands_on_next: bool,
+}
+
+/// The per-word 16-byte rows of slot 0 (v0.26.0): 0x1000..0x1405 ukr
+/// (64 rows + 5 B leftover), 0xC20..0xF5D rus (51 rows + 13 B). Every
+/// 16-byte row carries data (ukr: a u8 field at +0x0C that is often
+/// zero but the surrounding bytes are set; rus: packed LmCode words +
+/// u16 fields). The on-disk encoding of the DLL's 224+ B `0xE` rows
+/// (the +0xD7 / +0xD8 / +0xD9 flag bytes of `FUN_100177d0`) is a
+/// v0.29+ B-tree item; this is the structural row decode.
+#[derive(Debug, Clone)]
+pub struct VmWordRows {
+    /// The section start (slot 0).
+    pub base: u32,
+    /// The 16-byte rows (the span down to the next table slot, 16-byte
+    /// aligned).
+    pub rows: Vec<[u8; 16]>,
+    /// The trailing bytes past the last full 16-byte row (5 ukr / 13 rus).
+    pub leftover: u32,
+    /// The rows carrying any non-zero byte.
+    pub nonzero_rows: u32,
+    /// The +0x0C row-field histogram over all rows (the ukr field values
+    /// are LmCode letter slots 0xA3..0xEF + small counters; sorted by
+    /// field value).
+    pub field_0c_hist: Vec<(u8, u32)>,
+}
+
+impl VmWordRows {
+    /// Decode the 16-byte row block in `[base, end)` (the next table
+    /// slot in file order, or the file end).
+    pub fn parse(bytes: &[u8], base: u32, end: u32) -> Option<Self> {
+        let b = base as usize;
+        let e = (end as usize).min(bytes.len());
+        if b + 16 > e {
+            return None;
+        }
+        let span = e - b;
+        let mut hist: std::collections::HashMap<u8, u32> =
+            std::collections::HashMap::new();
+        let mut rows: Vec<[u8; 16]> = Vec::new();
+        let mut nonzero = 0u32;
+        for r in (b..e).step_by(16).take_while(|&p| p + 16 <= e) {
+            let mut row = [0u8; 16];
+            row.copy_from_slice(&bytes[r..r + 16]);
+            if row.iter().any(|&x| x != 0) {
+                nonzero += 1;
+            }
+            let v = row[12];
+            *hist.entry(v).or_insert(0) += 1;
+            rows.push(row);
+        }
+        let mut field_0c_hist: Vec<(u8, u32)> = hist.into_iter().collect();
+        field_0c_hist.sort_by_key(|(v, _)| *v);
+        Some(VmWordRows {
+            base,
+            rows,
+            leftover: (span % 16) as u32,
+            nonzero_rows: nonzero,
+            field_0c_hist,
+        })
+    }
+}
+
+/// The 0x88 field-name registry block (slot 1; v0.26.0 empirical
+/// correction: **not** a u16-counted NUL-terminated string section —
+/// it is a small u32 config block). Layout: `[u32 marker][u32
+/// offset][u32 offset][u32 offset][u32 offset][u32 offset]` (the marker
+/// is 0x00FFxxxx — 0x00FFE703 ukr / 0x00FFEF02 rus; its low byte is
+/// the sub-entry count: 3 ukr / 2 rus; the u32 offsets point into the
+/// packed B-tree / row regions: 0x1900 / 0x1A00 / 0x1400 / 0x2400 /
+/// 0x2D00 ukr, 0x1100 / 0x1200 / 0x0D00 / … rus). The string decoding (the "field names") is blocked on
+/// the B-tree predicate walk (v0.29+).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmFieldRegistry {
+    /// The block start (0x88 in both files).
+    pub base: u32,
+    /// The marker u32 (0x00FFE703 ukr / 0x00FFEF02 rus — the 0xFF word
+    /// sits in bits 16..23; the low byte is the sub-entry count).
+    pub u88: u32,
+    /// The u32 offset stream (@0x8C..@0x9C).
+    pub offsets: [u32; 5],
+}
+
+impl VmFieldRegistry {
+    /// Parse the 0x88 block (requires at least `base + 0x22` bytes).
+    pub fn parse(bytes: &[u8], base: u32) -> Option<Self> {
+        let b = base as usize;
+        if b + 0x22 > bytes.len() {
+            return None;
+        }
+        let u88 = u32::from_le_bytes(bytes[b..b + 4].try_into().unwrap());
+        if (u88 & 0x00FF_0000) != 0x00FF_0000 {
+            return None; // the 0xFF word (bits 16..23) is the block marker
+        }
+        let mut offsets = [0u32; 5];
+        for i in 0..5 {
+            offsets[i] =
+                u32::from_le_bytes(bytes[b + 4 + i * 4..b + 8 + i * 4].try_into().unwrap());
+        }
+        Some(VmFieldRegistry { base, u88, offsets })
+    }
+
+    /// The marker's low byte (the sub-entry count: 3 ukr / 2 rus).
+    pub fn sub_count(&self) -> u8 {
+        (self.u88 & 0xFF) as u8
+    }
+}
+
+/// The full `.m` section walker (v0.26.0): classifies every table slot
+/// in file order and decodes the two role sections (slot 0 = the
+/// per-word rows, slot 1 = the 0x88 registry).
+#[derive(Debug, Clone)]
+pub struct VmSections {
+    /// The per-slot walks (deduplicated offsets, file order).
+    pub walks: Vec<VmSectionWalk>,
+    /// The slot-0 per-word rows (0x1000 ukr / 0xC20 rus).
+    pub word_rows: Option<VmWordRows>,
+    /// The slot-1 0x88 registry block.
+    pub registry: Option<VmFieldRegistry>,
+}
+
+impl VmSections {
+    /// Classify + walk every table slot of a parsed `.m` header.
+    pub fn parse(header: &VmHeader, bytes: &[u8]) -> Self {
+        let mut offs: Vec<u32> = header.table.iter().copied().collect();
+        offs.retain(|&o| o > 0 && o < bytes.len() as u32);
+        offs.sort_unstable();
+        offs.dedup();
+
+        // the file-order sections (span = down to the next slot or EOF)
+        let mut walks: Vec<VmSectionWalk> = Vec::new();
+        for (si, &off) in offs.iter().enumerate() {
+            let slot = header
+                .table
+                .iter()
+                .enumerate()
+                .find(|(_, v)| **v == off)
+                .map(|(i, _)| i as u8)
+                .unwrap_or(0xFF);
+            let head_u32 = if off as usize + 4 <= bytes.len() {
+                u32::from_le_bytes(
+                    bytes[off as usize..off as usize + 4].try_into().unwrap(),
+                )
+            } else {
+                0
+            };
+            let count = u16::from_le_bytes([
+                bytes[off as usize],
+                bytes.get(off as usize + 1).copied().unwrap_or(0),
+            ]) as u32;
+            let next = offs.get(si + 1).copied();
+            let end = next.unwrap_or(bytes.len() as u32);
+            let span = end - off;
+
+            // 1. the exact-tile u16 record tables (the word tables):
+            //    [u16 count][count u16 records] ending exactly on the
+            //    next slot.
+            let u16_end = off + 2 + count * 2;
+            if count >= 1
+                && next.is_some()
+                && u16_end == next.unwrap()
+            {
+                walks.push(VmSectionWalk {
+                    slot,
+                    off,
+                    head_u32,
+                    kind: VmSectionKind::U16Records,
+                    records: count,
+                    landed: u16_end,
+                    lands_on_next: true,
+                });
+                continue;
+            }
+            // 2. the role slots: slot 0 = the per-word rows, slot 1 =
+            //    the 0x88 registry (the `Small`/registry decode below),
+            //    slot 7 = the len-flag key index.
+            if slot == 0 && span >= 16 {
+                walks.push(VmSectionWalk {
+                    slot,
+                    off,
+                    head_u32,
+                    kind: VmSectionKind::WordRows,
+                    records: span / 16,
+                    landed: end,
+                    lands_on_next: false,
+                });
+                continue;
+            }
+            if slot == 7 {
+                let pairs = walk_lenflag_pairs(bytes, off, end);
+                walks.push(VmSectionWalk {
+                    slot,
+                    off,
+                    head_u32,
+                    kind: VmSectionKind::LenFlagIndex,
+                    records: pairs,
+                    landed: end,
+                    lands_on_next: false,
+                });
+                continue;
+            }
+            // 3. the small config blocks (span ≤ 64 B).
+            if span <= 64 {
+                walks.push(VmSectionWalk {
+                    slot,
+                    off,
+                    head_u32,
+                    kind: VmSectionKind::Small,
+                    records: 0,
+                    landed: end,
+                    lands_on_next: false,
+                });
+                continue;
+            }
+            // 4. a count field + a NUL walk (the predicate / pair
+            //    regions): the walk consumes `count` NUL-terminated
+            //    records and lands where it lands.
+            if count >= 1 && count <= 4096 {
+                let landed = nul_walk_land(bytes, off, count, 4096);
+                walks.push(VmSectionWalk {
+                    slot,
+                    off,
+                    head_u32,
+                    kind: VmSectionKind::NulRecords,
+                    records: count,
+                    landed,
+                    lands_on_next: next.is_some() && landed == next.unwrap(),
+                });
+                continue;
+            }
+            // 5. everything else: the opaque packed regions.
+            walks.push(VmSectionWalk {
+                slot,
+                off,
+                head_u32,
+                kind: VmSectionKind::Packed,
+                records: 0,
+                landed: end,
+                lands_on_next: false,
+            });
+        }
+
+        // the role decodes
+        let word_rows = header
+            .table
+            .get(0)
+            .copied()
+            .filter(|&o| o > 0 && o < bytes.len() as u32)
+            .and_then(|o| {
+                let si = offs.iter().position(|&x| x == o)?;
+                let end = offs.get(si + 1).copied().unwrap_or(bytes.len() as u32);
+                VmWordRows::parse(bytes, o, end)
+            });
+        let registry = header
+            .table
+            .get(1)
+            .copied()
+            .filter(|&o| o > 0 && o < bytes.len() as u32)
+            .and_then(|o| VmFieldRegistry::parse(bytes, o));
+
+        VmSections {
+            walks,
+            word_rows,
+            registry,
+        }
+    }
+
+    /// The walk of one slot (`None` when the slot value is not a
+    /// section in this file).
+    pub fn walk(&self, slot: u8) -> Option<&VmSectionWalk> {
+        self.walks.iter().find(|w| w.slot == slot)
+    }
+
+    /// How many sections tile the file exactly (the DoD assertion
+    /// target; empirically the `U16Records` word tables only).
+    pub fn tiling_count(&self) -> u32 {
+        self.walks.iter().filter(|w| w.lands_on_next).count() as u32
+    }
+}
+
+/// Count the `(u8 len, u8 flag)` pairs of a key directory: the section
+/// may start with NUL padding or an ascending u16 offset run; the
+/// pairs follow (each 2 bytes) until a NUL or the section end.
+fn walk_lenflag_pairs(bytes: &[u8], off: u32, end: u32) -> u32 {
+    let mut p = off as usize;
+    let e = end as usize;
+    // skip NUL padding
+    while p < e && bytes[p] == 0x00 {
+        p += 1;
+    }
+    // skip an ascending u16 offset run (the rus 0x25C1 shape)
+    while p + 2 < e {
+        let u = u16::from_le_bytes([bytes[p], bytes[p + 1]]);
+        if u == 0x0000 {
+            p += 2;
+            break;
+        }
+        // an offset run value stays below the section span
+        if (u as u32) > (end - off) {
+            break;
+        }
+        p += 2;
+        // pairs start with small values (<= 0x80)
+        if *bytes.get(p).unwrap_or(&0x01) > 0x80 {
+            break;
+        }
+    }
+    let mut n = 0u32;
+    while p + 2 <= e {
+        if bytes[p + 1] > 0x02 || bytes[p] == 0x00 {
+            break;
+        }
+        n += 1;
+        p += 2;
+    }
+    n
+}
+
+/// The `FUN_10004230` NUL-terminated walk landing (the `trident_voc`
+/// advance rule with WALK_BLOCK = 4096), consuming `count` records.
+fn nul_walk_land(bytes: &[u8], off: u32, count: u32, block: u32) -> u32 {
+    let mut p = off as usize + 2;
+    for _ in 0..count {
+        if p >= bytes.len() {
+            break;
+        }
+        let mut len = 1usize;
+        while p + len < bytes.len() && bytes[p + len] != 0x00 {
+            len += 1;
+        }
+        if p + len < bytes.len() && bytes[p + len] == 0x00 {
+            p += len + 1;
+        } else {
+            p = ((p / block as usize) + 1) * block as usize;
+        }
+    }
+    p as u32
+}
+
 /// The maximal `A-Z` / `0-9` runs of a payload (length >= 2).
 fn latin_runs_of(payload: &[u8]) -> Vec<String> {
     let is_latin = |b: u8| b.is_ascii_alphanumeric();
@@ -859,7 +1253,7 @@ mod tests {
         let next = h.table[12];
         let count = u16::from_le_bytes([m[word as usize], m[word as usize + 1]]);
         assert_eq!(count, 0xFE, "ukr word-table count (254)");
-        let extent = (next as usize - word as usize);
+        let extent = next as usize - word as usize;
         assert_eq!(extent, (1 + count as usize) * 2, "the section fills exactly");
         // the offsets are ascending (a relative record pool)
         let mut off = word as usize + 2;
@@ -1156,5 +1550,162 @@ mod tests {
         assert_eq!(ts.records[2].list, vec![0x24, 0x0E, 0x26, 0x1D, 0x3E]);
         assert_eq!(ts.records[3].key, *b"*");
         assert_eq!(ts.records[3].list, vec![0x3E, 0x1D]);
+    }
+
+    // ------------------------------------------------------------------
+    // v0.26.0: the `.m` section walker (roadmap v0.27.0)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn m_sections_walk_classify_the_real_lmur_m() {
+        let Some(m) = real(r"C:\Zakon.Local\Baza\SOFT\lmur.m") else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let hm = VmHeader::parse(&m).expect("ukr .m header");
+        let secs = VmSections::parse(&hm, &m);
+        assert_eq!(secs.walks.len(), 16, "every table slot is walked");
+        // the DoD tiling assert: exactly the u16 word tables tile the
+        // file (the packed B-tree regions interleave and land at the
+        // region end / file tail)
+        assert_eq!(secs.tiling_count(), 1, "one exactly-tiling section");
+        // slot 11 = the u16 word table: [u16 count=254][254 u16] ending
+        // exactly on the next slot (0x37CB → 0x39C9)
+        let w11 = secs.walk(11).expect("slot 11 walked");
+        assert_eq!(w11.kind, VmSectionKind::U16Records);
+        assert!(w11.lands_on_next, "the word table tiles the file");
+        assert_eq!(w11.off, 0x37CB);
+        assert_eq!(w11.records, 254);
+        assert_eq!(w11.landed, 0x39C9);
+        // slot 0 = the per-word 16-byte rows (64 rows + 5 B leftover)
+        let w0 = secs.walk(0).expect("slot 0 walked");
+        assert_eq!(w0.kind, VmSectionKind::WordRows);
+        assert_eq!(w0.records, 64);
+        let rows = secs.word_rows.as_ref().expect("the word rows decoded");
+        assert_eq!(rows.base, 0x1000);
+        assert_eq!(rows.rows.len(), 64, "64×16B rows in the 1029 B span");
+        assert_eq!(rows.leftover, 5);
+        assert_eq!(rows.nonzero_rows, 64, "every 16B row carries data");
+        // slot 7 = the (len, flag) key directory
+        let w7 = secs.walk(7).expect("slot 7 walked");
+        assert_eq!(w7.kind, VmSectionKind::LenFlagIndex);
+        assert!(w7.records > 0, "the key pairs are counted");
+        // the 0x88 registry (v0.26.0 empirical: a u32 config block, not a
+        // NUL-terminated string section)
+        let reg = secs.registry.as_ref().expect("the 0x88 registry decoded");
+        assert_eq!(reg.base, 0x88);
+        assert_eq!(reg.u88, 0x00FFE703, "the 0x00FFxx marker u32");
+        assert_eq!(reg.sub_count(), 3, "the marker's low byte (3 ukr)");
+        assert_eq!(reg.offsets[0], 0x1900, "the first u32 region offset");
+        // the kind histogram sanity (16 = the sum over all kinds)
+        let sum: u32 = secs
+            .walks
+            .iter()
+            .map(|w| match w.kind {
+                VmSectionKind::U16Records
+                | VmSectionKind::NulRecords
+                | VmSectionKind::WordRows
+                | VmSectionKind::LenFlagIndex
+                | VmSectionKind::Small
+                | VmSectionKind::Packed
+                | VmSectionKind::Unknown => 1,
+            })
+            .sum();
+        assert_eq!(sum, 16);
+    }
+
+    #[test]
+    fn m_sections_walk_classify_the_real_lmru_m() {
+        let Some(m) = real(r"C:\Zakon.Local\Baza\SOFT\lmru.m") else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let hm = VmHeader::parse(&m).expect("rus .m header");
+        let secs = VmSections::parse(&hm, &m);
+        assert_eq!(secs.walks.len(), 16, "every table slot is walked");
+        assert_eq!(secs.tiling_count(), 1, "one exactly-tiling section");
+        // slot 11 = the rus u16 word table (256 records, 0x3001 → 0x3203)
+        let w11 = secs.walk(11).expect("slot 11 walked");
+        assert_eq!(w11.kind, VmSectionKind::U16Records);
+        assert!(w11.lands_on_next, "the rus word table tiles the file");
+        assert_eq!(w11.off, 0x3001);
+        assert_eq!(w11.records, 256);
+        assert_eq!(w11.landed, 0x3203);
+        // slot 0 = the rus per-word rows (51 rows + 13 B leftover)
+        let rows = secs.word_rows.as_ref().expect("the rus word rows decoded");
+        assert_eq!(rows.base, 0xC20);
+        assert_eq!(rows.rows.len(), 51, "51×16B rows in the 829 B span");
+        assert_eq!(rows.leftover, 13);
+        // slot 7 = the rus key directory (the u16 offset run + the pairs)
+        let w7 = secs.walk(7).expect("slot 7 walked");
+        assert_eq!(w7.kind, VmSectionKind::LenFlagIndex);
+        // the rus 0x88 registry
+        let reg = secs.registry.as_ref().expect("the 0x88 registry decoded");
+        assert_eq!(reg.u88, 0x00FFEF02, "the rus marker u32");
+        assert_eq!(reg.sub_count(), 2, "the marker's low byte (2 rus)");
+        assert_eq!(reg.offsets[0], 0x1100, "the first u32 region offset");
+    }
+
+    #[test]
+    fn vm_word_rows_parse_a_synthetic_block() {
+        // 3 full 16-byte rows + 4 leftover bytes
+        let mut buf = vec![0u8; 64 + 52 + 4];
+        buf[64 + 0] = 0x2A; // row 0, a non-zero byte
+        buf[64 + 16 + 12] = 0xA3; // row 1, the +0x0C field
+        buf[64 + 32 + 12] = 0xA4; // row 2, the +0x0C field
+        let r = VmWordRows::parse(&buf, 64, 64 + 52).expect("rows");
+        assert_eq!(r.rows.len(), 3);
+        assert_eq!(r.leftover, 4);
+        assert_eq!(r.nonzero_rows, 3);
+        let hist: std::collections::HashMap<u8, u32> =
+            r.field_0c_hist.iter().cloned().collect();
+        assert_eq!(hist.get(&0x00), Some(&1));
+        assert_eq!(hist.get(&0xA3), Some(&1));
+        assert_eq!(hist.get(&0xA4), Some(&1));
+        // a span shorter than one row yields None
+        assert!(VmWordRows::parse(&buf, 64, 70).is_none());
+    }
+
+    #[test]
+    fn vm_field_registry_requires_the_marker() {
+        // a valid 0x88 block: the 0x00FFxx marker + five u32 offsets
+        let mut buf = vec![0u8; 64 + 0x88 + 0x22];
+        buf[0x88..0x8C].copy_from_slice(&0x00FFE703u32.to_le_bytes());
+        buf[0x8C..0x90].copy_from_slice(&0x1900u32.to_le_bytes());
+        let r = VmFieldRegistry::parse(&buf, 0x88).expect("registry");
+        assert_eq!(r.u88, 0x00FFE703);
+        assert_eq!(r.sub_count(), 3);
+        assert_eq!(r.offsets[0], 0x1900);
+        // a missing 0xFF high word is rejected
+        let mut bad = buf.clone();
+        bad[0x88..0x8C].copy_from_slice(&0x12345678u32.to_le_bytes());
+        assert!(VmFieldRegistry::parse(&bad, 0x88).is_none());
+    }
+
+    #[test]
+    fn vm_sections_classify_a_synthetic_u16_tiling_table() {
+        // a minimal synthetic `.m`: the 64-byte header (FREE marker) + a
+        // 16-slot table where slot 0 points at a u16 record table that
+        // ends exactly on the next slot (the tiling case).
+        let mut buf = vec![0u8; 64 + 0x200];
+        buf[0x38..0x3C].copy_from_slice(b"FREE");
+        // table @0x40: slot 0 = 0x100 (a u16 table), slot 1 = 0x108
+        buf[0x40..0x44].copy_from_slice(&0x100u32.to_le_bytes());
+        buf[0x44..0x48].copy_from_slice(&0x108u32.to_le_bytes());
+        // the u16 table @0x100: [u16 count=3][3 u16 records] = 8 B,
+        // ending exactly at 0x108 (the next slot)
+        buf[0x100..0x102].copy_from_slice(&3u16.to_le_bytes());
+        for i in 0..3 {
+            buf[0x102 + i * 2..0x104 + i * 2]
+                .copy_from_slice(&(i as u16).to_le_bytes());
+        }
+        let hm = VmHeader::parse(&buf).expect("synthetic header");
+        let secs = VmSections::parse(&hm, &buf);
+        assert_eq!(secs.tiling_count(), 1, "the u16 table tiles");
+        let w0 = secs.walk(0).expect("slot 0 walked");
+        assert_eq!(w0.kind, VmSectionKind::U16Records);
+        assert!(w0.lands_on_next);
+        assert_eq!(w0.records, 3);
+        assert_eq!(w0.landed, 0x108);
     }
 }

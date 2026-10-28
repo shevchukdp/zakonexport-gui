@@ -566,6 +566,12 @@ pub struct TridentIndex {
     pub rus_word_table: Option<crate::trident_vt::VmWordTable>,
     /// the Russian u16 predicate table (`lmru.m` slot 5, v0.22.0)
     pub rus_pred_table: Option<crate::trident_vt::VmPredicateTable>,
+    /// the `.m` section walker (v0.26.0, roadmap v0.27.0: every 16-slot
+    /// table section classified + the slot-0 per-word rows + the 0x88
+    /// registry) — `None` when `lmur.m` is absent
+    pub m_sections: Option<crate::trident_vt::VmSections>,
+    /// the Russian `.m` section walker (`lmru.m`, v0.26.0)
+    pub rus_m_sections: Option<crate::trident_vt::VmSections>,
     /// the `lmu.use` usage-flags file (v0.20.0; the body is all zeros in
     /// this base — the 2005-era index does not enable the flags)
     pub use_flags: Option<crate::trident_vt::UseFile>,
@@ -676,6 +682,13 @@ impl TridentIndex {
                 .and_then(|h| h.pred_off())
                 .and_then(|off| crate::trident_vt::VmPredicateTable::parse(m, off))
         });
+        // v0.26.0: the `.m` section walker (every 16-slot section
+        // classified + the slot-0 per-word rows + the 0x88 registry)
+        let m_sections =
+            m_bytes
+                .as_deref()
+                .zip(vm_header.as_ref())
+                .map(|(m, h)| crate::trident_vt::VmSections::parse(h, m));
         // the Russian streams + the usage-flags file (v0.20.0)
         let rus_vt_bytes = read("lmru.vt");
         let rus_vt_stream = rus_vt_bytes
@@ -701,6 +714,12 @@ impl TridentIndex {
                 .and_then(|h| h.pred_off())
                 .and_then(|off| crate::trident_vt::VmPredicateTable::parse(m, off))
         });
+        // v0.26.0: the Russian `.m` section walker
+        let rus_m_sections =
+            ru_bytes
+                .as_deref()
+                .zip(rus_vm_header.as_ref())
+                .map(|(m, h)| crate::trident_vt::VmSections::parse(h, m));
         let use_flags = read("lmu.use")
             .as_deref()
             .and_then(crate::trident_vt::UseFile::parse);
@@ -729,10 +748,12 @@ impl TridentIndex {
             vm_header,
             word_table,
             pred_table,
+            m_sections,
             rus_vt_stream,
             rus_vm_header,
             rus_word_table,
             rus_pred_table,
+            rus_m_sections,
             use_flags,
             inventory,
         })
@@ -930,10 +951,6 @@ impl TridentIndex {
     /// Find the first dictionary word that starts with `prefix` (the
     /// dictionary is sorted bytewise, so a binary search for the first
     /// word >= prefix, then a prefix scan).
-    fn find_prefix(&self, prefix: &[u8]) -> Option<usize> {
-        self.find_prefix_in(&self.lang_ctx(Lang::Ukr), prefix)
-    }
-
     fn find_prefix_in(&self, lc: &LangCtx<'_>, prefix: &[u8]) -> Option<usize> {
         let dict = lc.dict_words;
         let mut lo = 0usize;
@@ -969,10 +986,6 @@ impl TridentIndex {
     /// reported doc count — is an estimate that scales with the dictionary
     /// size. The exact per-word boundaries (and the oracle-validated
     /// doc-number join) come from the packed B-tree decode (roadmap).
-    fn posting_slice(&self, word_idx: usize) -> Vec<u32> {
-        self.posting_slice_in(&self.lang_ctx(Lang::Ukr), word_idx)
-    }
-
     fn posting_slice_in(&self, lc: &LangCtx<'_>, word_idx: usize) -> Vec<u32> {
         if lc.vt_u16.is_empty() || lc.dict_words.is_empty() {
             return Vec::new();
@@ -1376,10 +1389,12 @@ mod tests {
             vm_header: None,
             word_table: None,
             pred_table: None,
+            m_sections: None,
             rus_vt_stream: None,
             rus_vm_header: None,
             rus_word_table: None,
             rus_pred_table: None,
+            rus_m_sections: None,
             use_flags: None,
             inventory: Vec::new(),
         };

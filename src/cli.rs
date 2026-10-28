@@ -32,7 +32,8 @@ Usage:
           several docnums (space- or comma-separated, ranges) print one after another
   zakonexport-cli trident          report the base's native FTS index status
           (SOFT\\ inventory — 16 files incl. windows.kod + lm.a, plus the
-          decoded parts: kod codes, fold pairs, dict records, vt stream;
+          decoded parts: kod codes, fold pairs, dict records, vt stream; .m section
+          walker (v0.26.0: 16-slot classification + word-rows + 0x88 registry);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -137,6 +138,57 @@ struct Options {
     /// tsearch: the Trident language — "u" (Ukrainian, default), "r"
     /// (Russian), or "auto" (both, merged)
     lang: String,
+}
+
+/// v0.26.0: the `.m` section-walker summary line for the `trident` verb
+/// (roadmap v0.27.0): one language's 16-slot table classified (kind
+/// counts + the tile count) + the slot-0 per-word rows + the 0x88
+/// registry. `None` (absent `.m`) yields the placeholder line.
+fn m_sections_line(
+    tag: &str,
+    m_name: &str,
+    secs: &Option<crate::trident_vt::VmSections>,
+) -> String {
+    let Some(secs) = secs else {
+        return format!("{tag} {m_name}: .m-файл відсутній");
+    };
+    use crate::trident_vt::VmSectionKind;
+    let mut counts: std::collections::HashMap<VmSectionKind, u32> =
+        std::collections::HashMap::new();
+    for w in &secs.walks {
+        *counts.entry(w.kind).or_insert(0) += 1;
+    }
+    let n = |k: VmSectionKind| *counts.get(&k).unwrap_or(&0);
+    let u16 = n(VmSectionKind::U16Records);
+    let nul = n(VmSectionKind::NulRecords);
+    let wr = n(VmSectionKind::WordRows);
+    let lf = n(VmSectionKind::LenFlagIndex);
+    let small = n(VmSectionKind::Small);
+    let packed = n(VmSectionKind::Packed);
+    let rows = secs
+        .word_rows
+        .as_ref()
+        .map(|r| format!(" ({}×16B, {} non-zero)", r.rows.len(), r.nonzero_rows))
+        .unwrap_or_default();
+    let reg = secs
+        .registry
+        .as_ref()
+        .map(|r| format!(" registry 0x{:x} (0x{:08X}, sub={})", r.base, r.u88, r.sub_count()))
+        .unwrap_or_default();
+    format!(
+        "m-секції (v0.26.0, {tag} {m_name}): {} слотів · u16-записники {} (tiling {}) · \
+         NUL-рекорди {} · word-rows {}{} · len-flag {} · small {} · packed {} ·{}",
+        secs.walks.len(),
+        u16,
+        secs.tiling_count(),
+        nul,
+        wr,
+        rows,
+        lf,
+        small,
+        packed,
+        reg
+    )
 }
 
 fn parse_args() -> Options {
@@ -1078,6 +1130,11 @@ pub fn main_cli() {
                     idx.rus_vt_u16.len(),
                     rus_records
                 );
+                // v0.26.0: the `.m` section walker (roadmap v0.27.0) —
+                // every 16-slot table section classified + the slot-0
+                // per-word rows + the 0x88 registry (both languages)
+                println!("{}", m_sections_line("ukr", "lmur.m", &idx.m_sections));
+                println!("{}", m_sections_line("rus", "lmru.m", &idx.rus_m_sections));
                 // the exact .voc morphology tables (v0.17.0)
                 if let Some(m) = &idx.morphology {
                     let t = &m.table;
@@ -1410,6 +1467,8 @@ pub fn main_cli() {
                  ftsearch, збіг по термінах). \\
                  v0.25.0: rus-узагальнення — language-generic loader (LangCtx, \\
                  Lang {{Ukr,Rus}}) + tsearch --lang u|r|auto + trident мовні індекси). \\
+                 v0.26.0: m-секційний walker (VmSections — класифікація 16 слотів \\\
+                 .m-таблиці + 16B word-rows slot-0 + 0x88 registry + tiling-assert). \\\
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

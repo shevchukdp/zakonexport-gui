@@ -1366,6 +1366,8 @@ pub fn main_cli() {
                  dump <файл> [офс] [довжина]. \
                  v0.22.0: структурний декод u16 word/predicate-таблиць (254/256 \
                  records, 0xFFFA-маркери, sentinel 0xCECA, fingerprint у trident). \
+                 v0.23.0: join native→docnum (trident_join::DocJoin::probe — \
+                 u16-простір 2005 vs поточні docnums; openable-субмножина в tsearch). \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())
@@ -1374,8 +1376,9 @@ pub fn main_cli() {
             // Experimental native-index search: encode the query through the
             // LmCode character table, look the terms up in the lmu.voc
             // dictionary, read posting slices from lmur.vt. The document
-            // numbers are the native Trident ids of the 2005-era index; the
-            // join to the current base docnums is a later version.
+            // numbers are the native Trident ids of the 2005-era index;
+            // v0.23.0 probes the join to the current base docnums
+            // (trident_join::DocJoin) and reports the openable subset.
             require_baza(&o)?;
             let q = get_query(&o)?;
             if q.is_empty() {
@@ -1436,10 +1439,53 @@ pub fn main_cli() {
                     println!("    … (ще {})", r.joined.len() - 12);
                 }
             }
+            // v0.23.0: the doc-number join probe — the native u16 space
+            // vs the current base's doc count (render::Base)
+            let doc_count = render::Base::load(&o.baza)
+                .map(|b| b.doc_count())
+                .unwrap_or(0);
+            let join = crate::trident_join::DocJoin::probe(&idx.vt_u16, doc_count);
+            let kind = match join.kind {
+                crate::trident_join::JoinKind::Identity => {
+                    "Identity (u16-простір цілком в межах поточних docnums)"
+                }
+                crate::trident_join::JoinKind::Bounded => {
+                    "Bounded (2005-простір ширший; openable = u16 ≤ поточний docnum)"
+                }
+                crate::trident_join::JoinKind::Unknown => {
+                    "Unknown (поточну базу не завантажено)"
+                }
+            };
+            if !r.joined.is_empty() {
+                println!(
+                    "  join native→docnum (v0.23.0): u16-простір {}..{} \
+                     ({} distinct / {} total) vs поточна база: {} док-ів → {}",
+                    join.min_u16,
+                    join.max_u16,
+                    join.distinct_u16,
+                    join.total_u16,
+                    join.doc_count,
+                    kind
+                );
+                for (cand, off, u16s) in r.joined.iter().take(4) {
+                    let open = join.openable(u16s);
+                    let shown: Vec<String> =
+                        open.iter().take(12).map(|u| u.to_string()).collect();
+                    println!(
+                        "    «{cand}» @0x{off:x}: openable (≤{max} docnum): \
+                         {shown} — {n} / {tot} u16",
+                        max = join.doc_count,
+                        shown = shown.join(" "),
+                        n = open.len(),
+                        tot = u16s.len(),
+                    );
+                }
+            }
             if r.docs.is_empty() {
                 println!(
-                    "  результат: 0 документів (точні word→postings кордони та \
-                     join native→docnum — далі в roadmap)"
+                    "  результат: 0 документів (точні word→postings кордони; \
+                     join native→docnum — v0.23.0: {kind}, openable-субмножина \
+                     показана вище)"
                 );
             } else {
                 let shown = r

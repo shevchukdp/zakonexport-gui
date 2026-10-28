@@ -22,6 +22,7 @@ pub mod printdoc;
 pub mod render;
 pub mod signal;
 pub mod trident;
+pub mod trident_join;
 pub mod trident_voc;
 pub mod trident_vt;
 pub mod update;

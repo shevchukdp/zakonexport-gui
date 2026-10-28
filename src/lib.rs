@@ -36,10 +36,15 @@ pub const BASE_AUDIT: &str = r"C:\Zakon.Local\Baza.GK";
 
 /// Single source for the app version (bumped together with Cargo.toml).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The release date, single-sourced from Cargo.toml's `[package.metadata]
+/// date` (baked in by `build.rs` as `ZAKON_RELEASE_DATE`).
+pub const RELEASE_DATE: &str = env!("ZAKON_RELEASE_DATE");
 /// Program name shown in titles / about dialogs.
 pub const APP_NAME: &str = "Zakon DB Exporter";
-/// Copy shown in the about dialogs and `about`/`--version`.
-pub const COPYRIGHT: &str = "2026 Дмитро Шевчук";
+/// Copy shown in the about dialogs and `about`/`--version`. The copyright
+/// carries the full release date (single-sourced from the same
+/// `[package.metadata] date` field as [`RELEASE_DATE`]).
+pub const COPYRIGHT: &str = concat!(env!("ZAKON_RELEASE_DATE"), " Дмитро Шевчук");
 
 /// Full about text (console + MessageBox in the GUI).
 pub fn about_text() -> String {

@@ -54,7 +54,7 @@ Usage:
           no B-tree decode needed
   zakonexport-cli bulk [--format md|rtf|docx|html|csv|pdf] [--out dir] [--max n] [--single]
   zakonexport-cli stats
-  zakonexport-cli about   (= --version: name, version, copyright)
+  zakonexport-cli about   (= --version: name, version, copyright, release date)
 
 GUI: zakonexport-gui.exe (double-click — opens the window directly,
 same engines; console-free in release builds)
@@ -694,11 +694,12 @@ pub fn main_cli() {
     let mut o = parse_args();
     if o.version {
         println!(
-            "{} {}\n{}\n© {}",
+            "{} {}\n{}\n© {}\nreleased {}",
             "zakonexport-cli",
             crate::VERSION,
             crate::APP_NAME,
-            crate::COPYRIGHT
+            crate::COPYRIGHT,
+            crate::RELEASE_DATE
         );
         return;
     }

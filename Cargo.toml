@@ -4,6 +4,12 @@ version = "0.32.0"
 edition = "2021"
 autobins = false
 
+# Release date — single-sourced (bumped with the version at each release).
+# build.rs reads this and bakes it into the binary as ZAKON_RELEASE_DATE
+# (mirrors how CARGO_PKG_VERSION is surfaced via env! in src/lib.rs).
+[package.metadata]
+date = "2026-10-28"
+
 # two separate executables from the same engine:
 [[bin]]
 name = "zakonexport-cli" # console tool (all verbs; `gui` is a fallback)

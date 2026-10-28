@@ -2292,7 +2292,17 @@ fn export_worker(
     } else {
         crate::highlight::Hl::default()
     };
-    match writers::export_hits(&baza, &hits, &format, &naming, Some(&progress), attach, single, &hl) {
+    match writers::export_hits(
+        &baza,
+        &hits,
+        &format,
+        &naming,
+        Some(&progress),
+        attach,
+        single,
+        &hl,
+        None,
+    ) {
         Ok((exported, attached, out)) => {
             let _ = tx.send(GuiMsg::ExportDone {
                 gen,

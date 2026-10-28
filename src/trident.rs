@@ -1205,6 +1205,35 @@ impl TridentIndex {
     }
 }
 
+/// v0.37.0 (roadmap v0.38.0): resolve the tsearch-joined native u16 doc-ids
+/// into the **openable** current-base docnums (those `0 < u16 <= doc_count`)
+/// and, for each, the join candidates `(cand, record_off)` that produced it.
+/// Returns `(docnums, docnum -> evidence)`. EN: the native-u16 →
+/// current-docnum resolution + the per-doc native-id evidence for the
+/// `export --trident-docs` flag (the openable subset of the Identity/Bounded
+/// join kind, v0.23.0).
+pub fn trident_docs_from_result(
+    r: &TridentResult,
+    doc_count: u32,
+) -> (Vec<u32>, std::collections::HashMap<u32, Vec<(String, usize)>>) {
+    let mut ev: std::collections::HashMap<u32, Vec<(String, usize)>> =
+        std::collections::HashMap::new();
+    for (cand, off, u16s) in &r.joined {
+        for &u in u16s {
+            if u == 0 {
+                continue;
+            }
+            let dn = u as u32;
+            if dn > doc_count {
+                continue; // wider than this base's docnum space (2005-era)
+            }
+            ev.entry(dn).or_default().push((cand.clone(), *off));
+        }
+    }
+    let docnums: Vec<u32> = ev.keys().copied().collect();
+    (docnums, ev)
+}
+
 /// Extract the dictionary records from a `.voc` file.
 ///
 /// A word record is `[tag][word][flag]` where:
@@ -1322,6 +1351,102 @@ mod tests {
             h.starts_with("(не кодується"),
             "«…» is not LmCode-encodable, got {h}"
         );
+    }
+
+    #[test]
+    fn trident_docs_from_result_drops_out_of_range_u16() {
+        // a synthetic result: one joined record with a mix of in/out u16s —
+        // the zero is skipped, the ids above the bound are dropped, and the
+        // openable ones are kept with their (candidate, offset) evidence.
+        let r = TridentResult {
+            docs: Vec::new(),
+            docs_fallback: false,
+            matched: Vec::new(),
+            joined: vec![("NE".to_string(), 0x19e2, vec![0, 100, 500, 1000])],
+            coverage: 1.0,
+            dict_size: 0,
+            vt_size: 0,
+        };
+        // doc_count = 1000: 100, 500, 1000 openable (0 is a blank posting)
+        let (docnums, ev) = trident_docs_from_result(&r, 1000);
+        let got: std::collections::HashSet<u32> =
+            docnums.into_iter().collect();
+        let want: std::collections::HashSet<u32> =
+            [100, 500, 1000].into_iter().collect();
+        assert_eq!(got, want, "the openable u16 set resolves exactly");
+        assert!(
+            ev.get(&100).is_some() && ev.get(&500).is_some() && ev.get(&1000).is_some()
+        );
+        // a tighter bound (500) drops the 1000 id, keeps 100 and 500
+        let (d2, _e2) = trident_docs_from_result(&r, 500);
+        assert!(
+            d2.contains(&500) && d2.contains(&100) && !d2.contains(&1000),
+            "the tight bound drops only the out-of-range id"
+        );
+    }
+
+    #[test]
+    fn trident_docs_from_result_resolves_openable_docnums() {
+        // v0.37.0 (roadmap v0.38.0): the native u16 -> current-docnum
+        // resolution + the per-doc native-id evidence for `export
+        // --trident-docs`. Uses the confirmed v0.19.0 anchors («не»→NE,
+        // «пере»→PERE) which join into the real `.vt` stream.
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let idx = TridentIndex::open(baza).expect("index should load");
+        let r = idx.search_lang("не пере", Lang::Ukr);
+        assert!(
+            !r.joined.is_empty(),
+            "the confirmed stems (NE/PERE) join into the .vt stream"
+        );
+        // at least one non-zero native u16 (a real posting, not a blank record)
+        assert!(
+            r.joined
+                .iter()
+                .any(|(_, _, u)| u.iter().any(|&x| x != 0)),
+            "the join found real native u16 postings"
+        );
+        // a very large doc_count keeps every non-zero native u16 openable
+        // (the Identity bound) — the evidence set is exactly that union
+        let (docnums, ev) = trident_docs_from_result(&r, u32::MAX);
+        assert!(!docnums.is_empty(), "every openable u16 resolves to a docnum");
+        for (dn, items) in &ev {
+            assert!(!items.is_empty(), "evidence is non-empty for docnum {dn}");
+            assert!(
+                docnums.contains(dn),
+                "every evidence docnum is in the resolved set"
+            );
+            for (c, off) in items {
+                assert!(!c.is_empty(), "a candidate is recorded in the evidence");
+                assert!(*off > 0, "the record offset is a real .vt offset");
+            }
+        }
+        // the evidence union equals the openable u16 set (no docnum without a
+        // join candidate, and vice versa)
+        let union: usize = r
+            .joined
+            .iter()
+            .map(|(_, _, u)| u.iter().filter(|&&x| x != 0).count() as usize)
+            .sum();
+        let ev_cells: usize = ev.values().map(|v| v.len()).sum();
+        // duplicates collapse in the map, so the map cells <= the raw union
+        assert!(ev_cells <= union, "the map only de-duplicates the union");
+        // a tight bound (the real base's docnum space) only ever *drops*
+        // docnums (the 2005-era ids wider than this base) — never adds
+        if let Ok(base) = crate::render::Base::load(baza) {
+            let cc = base.doc_count();
+            let (dn2, ev2) = trident_docs_from_result(&r, cc);
+            for &dn in &dn2 {
+                assert!(dn <= cc, "a resolved docnum is within the base's space");
+            }
+            assert!(
+                ev2.len() <= ev.len(),
+                "the tight bound only drops docnums, it never adds"
+            );
+        }
     }
 
     #[test]

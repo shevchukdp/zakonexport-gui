@@ -20,8 +20,11 @@ Usage:
   zakonexport-cli gui [--guitest] [--base general|audit|<path>] [--baza <path>]
   zakonexport-cli search <query> [--number] [--max n] [--fields] [search flags]
   zakonexport-cli export <query> [search flags] [--number] [filters] [--format md|rtf|docx|html|csv|pdf]
-        [--out dir] [--docs n1,n2-n5 | --pick] [--single] [--hl]
+        [--out dir] [--docs n1,n2-n5 | --pick] [--single] [--hl] [--trident-docs]
   zakonexport-cli export --docs 136974,222-225 [--format docx] [--out dir]
+  zakonexport-cli export <query> --trident-docs [--lang u|r|auto] [--format ...] [--out dir]
+          (v0.37.0: export the tsearch-joined native docnums — query → join →
+           docnums → bundle; each doc carries a native-u16 evidence line)
          (md/rtf/docx/html/pdf = one file per document, format-preserving layout;
           pdf embeds a subset of the auto-picked system font (Cyrillic fallback);
           csv = a single results-table file for the whole hit set)
@@ -146,6 +149,9 @@ struct Options {
     /// tsearch: the Trident language — "u" (Ukrainian, default), "r"
     /// (Russian), or "auto" (both, merged)
     lang: String,
+    /// export: run the native tsearch join and export the resolved docnums
+    /// with a per-doc native-u16 evidence column (v0.37.0)
+    trident_docs: bool,
 }
 
 /// v0.26.0: the `.m` section-walker summary line for the `trident` verb
@@ -228,6 +234,7 @@ fn parse_args() -> Options {
         hl: false,
         oracle: false,
         lang: String::from("u"),
+        trident_docs: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -351,6 +358,10 @@ fn parse_args() -> Options {
             "--lang" if next(i).is_some() => {
                 o.lang = next(i).unwrap().to_lowercase();
                 i += 2;
+            }
+            "--trident-docs" => {
+                o.trident_docs = true;
+                i += 1;
             }
             other => {
                 pos.push(other.to_string());
@@ -522,6 +533,147 @@ fn apply_filters(o: &Options, hits: Vec<db::Hit>) -> Result<Vec<db::Hit>> {
     }
     eprintln!("filtered by fields: {total} -> {}", kept.len());
     Ok(kept)
+}
+
+/// v0.37.0 (roadmap v0.38.0): `export --trident-docs` — run the native
+/// tsearch stem-join over the query and export the **resolved** docnums
+/// (the openable native u16 ids, `0 < u16 <= doc_count`) as a normal export
+/// bundle, each document carrying a per-doc **native-id evidence** column
+/// (the join candidates + `.vt` record offsets that produced that docnum).
+/// Closes the loop from `tsearch` (search) to the export bundle. EN: export
+/// the tsearch-joined docnums with the native-u16 evidence line.
+fn trident_docs_export(o: &Options, q: &str) -> Result<()> {
+    let Some(idx) = crate::trident::TridentIndex::open(&o.baza) else {
+        bail!(
+            "у базі {} немає робочого Trident-індексу (SOFT\\lmu.voc + lmur.vt) — \
+             --trident-docs недоступний",
+            o.baza.display()
+        );
+    };
+    // respect --lang (u default / r / auto) exactly like the tsearch verb
+    let auto = matches!(o.lang.as_str(), "auto" | "both");
+    let rus = matches!(o.lang.as_str(), "r" | "rus" | "рус");
+    let r = if auto {
+        idx.search_auto(q)
+    } else {
+        let l = if rus {
+            crate::trident::Lang::Rus
+        } else {
+            crate::trident::Lang::Ukr
+        };
+        idx.search_lang(q, l)
+    };
+    if r.joined.is_empty() {
+        eprintln!(
+            "--trident-docs: точний stem-join не знайшов record-ів «.vt» для \
+             «{q}» — жодного native docnum"
+        );
+        bail!("--trident-docs: join порожній (жодного docnum для експорту)");
+    }
+    let base = render::Base::load(&o.baza)?;
+    let doc_count = base.doc_count();
+    // the openable / dropped counters (for the log line): the native u16
+    // space maps to current docnums when `u16 <= doc_count` (the openable
+    // subset; the Identity/Bounded join kind, v0.23.0)
+    let mut openable = 0usize;
+    let mut dropped = 0usize;
+    for (_, _, u16s) in &r.joined {
+        for &u in u16s {
+            if u == 0 {
+                continue;
+            }
+            if (u as u32) > doc_count {
+                dropped += 1;
+            } else {
+                openable += 1;
+            }
+        }
+    }
+    // the resolved docnums (openable native u16 ids) + the per-doc evidence
+    let (docnums, ev) = crate::trident::trident_docs_from_result(&r, doc_count);
+    if ev.is_empty() {
+        eprintln!(
+            "--trident-docs: усі native u16 поза межами бази (≤ {doc_count} docnum) — \
+             нічого експортувати"
+        );
+        bail!("--trident-docs: жодного openable docnum (усі u16 > {doc_count})");
+    }
+    // the resolved docnums (the openable native u16 ids) -> hits
+    let mut hits: Vec<db::Hit> = Vec::new();
+    let mut missing: Vec<u32> = Vec::new();
+    for dn in docnums {
+        match base.span(dn) {
+            Ok((_, _, file)) => hits.push(db::Hit {
+                docnum: dn,
+                file: format!("{file}.mb"),
+                match_off: 0,
+                matches: 1,
+                title: String::new(),
+            }),
+            Err(_) => missing.push(dn),
+        }
+    }
+    if hits.is_empty() {
+        bail!("--trident-docs: жодного docnum не рендериться в базі");
+    }
+    if !missing.is_empty() {
+        let shown: Vec<String> = missing.iter().take(12).map(|x| x.to_string()).collect();
+        let more = if missing.len() > 12 { " …" } else { "" };
+        eprintln!("--trident-docs: недоступні docnum (span-помилка): {}{more}", shown.join(", "));
+    }
+    // the per-doc native-id evidence column: docnum -> "cand@0x…, cand@0x…"
+    let mut evidence: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    for (dn, mut items) in ev {
+        items.sort_by_key(|(c, o)| (c.clone(), *o));
+        items.dedup();
+        let s = items
+            .iter()
+            .map(|(c, off)| format!("{c}@0x{off:x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        evidence.insert(dn, s);
+    }
+    eprintln!(
+        "--trident-docs: join {} record-ів · openable u16 {openable} → {} docnum \
+         ({} поза межами ≤{doc_count})",
+        r.joined.len(),
+        hits.len(),
+        dropped
+    );
+    let naming = resolve_naming(&o);
+    let hl = if o.hl {
+        crate::highlight::Hl::from_query(q)
+    } else {
+        crate::highlight::Hl::default()
+    };
+    let (n, a, out) =
+        writers::export_hits(
+            &o.baza,
+            &hits,
+            &o.format,
+            &naming,
+            Some(&|d, t| {
+                eprint!("\rexport {d}/{t}  ");
+                let _ = std::io::stderr().flush();
+            }),
+            o.attach,
+            o.single,
+            &hl,
+            Some(&evidence),
+        )?;
+    eprintln!();
+    if o.single {
+        if o.attach {
+            println!("зв'язка (Trident): {n} документи -> 1 файл, {a} додатків -> {}", out.display());
+        } else {
+            println!("зв'язка (Trident): {n} документи -> 1 файл: {}", out.display());
+        }
+    } else if o.attach {
+        println!("Trident-експорт: {n} документи, {a} додатків -> {}", out.display());
+    } else {
+        println!("Trident-експорт: {n} документи (native docnums) -> {}", out.display());
+    }
+    Ok(())
 }
 
 /// Hits for the export verb: search by query, or a direct docnum list.
@@ -772,6 +924,12 @@ pub fn main_cli() {
         "export" => (|| {
             require_baza(&o)?;
             let q = get_query(&o)?;
+            // v0.37.0: --trident-docs runs the native tsearch join and exports
+            // the resolved docnums with a per-doc native-u16 evidence column
+            // (the native-id evidence, roadmap v0.38.0)
+            if o.trident_docs {
+                return trident_docs_export(&o, &q);
+            }
             let hits = collect_hits(&o, &q)?;
             let sel = if o.docs.is_some() && !o.pick {
                 let docs = o.docs.clone().unwrap();
@@ -803,7 +961,7 @@ pub fn main_cli() {
                 writers::export_hits(&o.baza, &sel, &o.format, &naming, Some(&|d, t| {
                     eprint!("\rexport {d}/{t}  ");
                     let _ = std::io::stderr().flush();
-                }), o.attach, o.single, &hl)?;
+                }), o.attach, o.single, &hl, None)?;
             eprintln!();
             if o.single {
                 if o.attach {
@@ -844,7 +1002,7 @@ pub fn main_cli() {
                 writers::export_hits(&o.baza, &all, &o.format, &naming, Some(&|d, t| {
                     eprint!("\rexport {d}/{t}   ");
                     let _ = std::io::stderr().flush();
-                }), o.attach, o.single, &hl)?;
+                }), o.attach, o.single, &hl, None)?;
             eprintln!();
             if o.single {
                 println!("зв'язка: {n} документи -> 1 файл: {}", out.display());
@@ -1604,6 +1762,8 @@ pub fn main_cli() {
                   v0.34.0: .g exact-Latin mapping (latin_exact - preferred-variant exact path, uncapped; LATIN_VARIANTS demoted to documented fallback) \\\
                   exact_postings prefers the exact candidate; real-corpus .vt hit rate recorded (100% awaits the DAT_1002f1f0 graph norm). \\\
                   v0.35.0: legacy-engine parity (lmsup.dll NE 16-bit New Executive no LMaster_* vs lmsup32.dll PE32 x86 0x14c LMaster_{{Begin,End,Lang,Tran}}; repaired dump_dll_exports.cjs). \\\
+                  GUI Trident panel (v0.36.0: separate modal window reusing TridentIndex + lmcode_hex; tsearch chain query->LmCode->candidate->.vt@off->docnums; guitest trident= marker) \\\
+                  export --trident-docs (v0.37.0: tsearch-joined native docnums -> bundle with a per-doc native-u16 evidence column; trident_docs_from_result openable resolution) \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

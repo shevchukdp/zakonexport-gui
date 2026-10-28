@@ -53,6 +53,7 @@ pub fn export_hits(
     attach: bool,
     single: bool,
     hl: &crate::highlight::Hl,
+    evidence: Option<&std::collections::HashMap<u32, String>>,
 ) -> anyhow::Result<(usize, usize, std::path::PathBuf)> {
     let out = Path::new(&naming.out_dir);
     let dir = naming.prepare_out(out)?;
@@ -83,7 +84,11 @@ pub fn export_hits(
                 .title
                 .clone()
                 .unwrap_or_else(|| first_line(&text, 60));
-            let head = head_from(&f, &h.file, &title, None);
+            let head = head_with_evidence(
+                head_from(&f, &h.file, &title, None),
+                evidence,
+                h.docnum,
+            );
             if attach {
                 // a unique per-doc attachment name inside one bundle folder
                 let stem = format!("doc_{}", h.docnum);
@@ -142,7 +147,11 @@ pub fn export_hits(
                 attached += 1;
             }
         }
-        let head = head_from(&f, &h.file, &title, sig_name.as_deref());
+        let head = head_with_evidence(
+            head_from(&f, &h.file, &title, sig_name.as_deref()),
+            evidence,
+            h.docnum,
+        );
         match format {
             "md" => write_markdown(&fpath, Some(&head), &text, hl)?,
             "rtf" => write_rtf(&fpath, Some(&head), &text, hl)?,
@@ -183,6 +192,24 @@ fn head_from(f: &crate::fields::DocFields, file: &str, title: &str, sig: Option<
         title: title.to_string(),
         lines,
     }
+}
+
+/// Prepend a per-doc native-u16 evidence line (v0.37.0, the
+/// `export --trident-docs` native-id column) to the export head when the
+/// doc's docnum has a native-id annotation. EN: the per-document native-id
+/// evidence column for the tsearch-joined export; the line is absent for
+/// every other export path (the map is `None` or lacks the docnum).
+fn head_with_evidence(
+    mut head: ExportHead,
+    evidence: Option<&std::collections::HashMap<u32, String>>,
+    docnum: u32,
+) -> ExportHead {
+    if let Some(m) = evidence {
+        if let Some(e) = m.get(&docnum) {
+            head.lines.push(format!("нативні u16 (Trident): {e}"));
+        }
+    }
+    head
 }
 
 /// A centered line starts with at least this many leading spaces (the base

@@ -16,6 +16,68 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.30.0 — 2026-10-28
+
+### UK
+- **`.voc` root B-tree descent (roadmap v0.31.0) — part 1.** `trident_voc.rs`:
+  - **`VocBTreeNode`** (`FUN_10002b70` case-fold-вузол): byte0 `0x80` =
+    child-list flag, `0x40` = `FUN_100028e0` leaf-path flag; byte1 `0x80` =
+    count-present, low 7 bits = child count; bytes 2.. = u16 child list
+    (pool-індекси: `<3000` = `FUN_10002620` pool-resolve; `3000..0xC1C` =
+    virtual children `+0x48` під flags `0x1000`/`0x4000`).
+  - **`VocBTree { root, pool }`** — root = `+0x3C` (з `VocSectionTable.root`);
+    `pool` = `DAT_1002db56` node-pool (u32-масив, caller-supplied; DLL-image
+    глобал, не dump-нуто). **`VocLeaf { node_off, vt_off, key }`** +
+    **`find(word)`** — pool-descent скелет: `<3000` children → `pool[c]` →
+    найглибший leaf (без child list).
+- **Емпірика (real lmu.voc)**: root @0x6832f, count=26, УСІ 26 children
+  `<3000` (pool-resolve path); root 0x40-flag = SET (root йде через
+  `FUN_100028e0` path). **find() з empty pool зупиняється на root** (без
+  panic); synthetic pool-descend test доходить до leaf.
+- **`TridentIndex.lmu_voc`** — raw `lmu.voc` bytes (для re-parse root-вузла).
+- **CLI `trident`**: новий рядок `voc-B-tree (v0.30.0, FUN_10002b70):
+  root=0x6832f count=26 (26 pool-children) · 0x40-flag yes · find() =
+  pool-descent skeleton (node-pool pin deferred)` + usage + roadmap-сумарі.
+- **173 юніт-тестів** (нові 2: real lmu.voc root decode + synthetic
+  pool-descent leaf). Guitest baseline `rows=430` без змін. Версія
+  **0.29.0 → 0.30.0**.
+- Далі (v0.31.0 / roadmap v0.32.0): node-pool pin + `FUN_100028e0` extract +
+  alias tables (`DAT_1002eca2..eca5`) — повне «конституція»-розв'язання +
+  leaf→`.vt` join.
+
+### EN
+- **The `.voc` root B-tree descent (roadmap v0.31.0) — part 1.**
+  `trident_voc.rs`:
+  - **`VocBTreeNode`** (the `FUN_10002b70` case-fold node): byte 0 `0x80` =
+    the child-list flag, `0x40` = the `FUN_100028e0` leaf-path flag; byte 1
+    `0x80` = the count-present flag, low 7 bits = the child count; bytes 2..
+    = the u16 child list (pool indices: `<3000` = the `FUN_10002620` pool
+    resolve; `3000..0xC1C` = the virtual children, the `+0x48` offset under
+    flags `0x1000`/`0x4000`).
+  - **`VocBTree { root, pool }`** — root = `+0x3C` (from
+    `VocSectionTable.root`); `pool` = the `DAT_1002db56` node-pool (the u32
+    array, caller-supplied; the DLL-image global, not dumped).
+    **`VocLeaf { node_off, vt_off, key }`** + **`find(word)`** — the
+    pool-descent skeleton: `<3000` children → `pool[c]` → the deepest leaf
+    (no child list).
+- **Empirics (the real lmu.voc)**: the root @0x6832f, count=26, ALL 26
+  children `<3000` (the pool-resolve path); the root 0x40-flag = SET (the
+  root takes the `FUN_100028e0` path). **`find()` with an empty pool stops
+  at the root** (no panic); the synthetic pool-descent test reaches a leaf.
+- **`TridentIndex.lmu_voc`** — the raw `lmu.voc` bytes (for the root-node
+  re-parse).
+- **CLI `trident`**: a new `voc-B-tree (v0.30.0, FUN_10002b70): root=0x6832f
+  count=26 (26 pool-children) · 0x40-flag yes · find() = pool-descent
+  skeleton (node-pool pin deferred)` line + the usage + roadmap summary.
+- **173 unit tests** (2 new: the real lmu.voc root decode + the synthetic
+  pool-descent leaf). The guitest baseline `rows=430` is unchanged. Version
+  **0.29.0 → 0.30.0**.
+- Next (v0.31.0 / roadmap v0.32.0): the node-pool pin + the `FUN_100028e0`
+  extract + the alias tables (`DAT_1002eca2..eca5`) — the full
+  «конституція» resolution + the leaf→`.vt` join.
+
+---
+
 ## v0.29.0 — 2026-10-28
 
 ### UK

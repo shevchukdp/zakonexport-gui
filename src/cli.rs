@@ -36,6 +36,7 @@ Usage:
           walker (v0.26.0: 16-slot classification + word-rows + 0x88 registry);
           predicate catalog (v0.27.0: FUN_100177d0 22 opcodes + evaluable subset);
           byte-VM part-1+2 (v0.29.0: FUN_100019f0 run_record, node pool + affix ops, 0x49 soft-continue);
+          .voc root B-tree (v0.30.0: FUN_10002b70 root-node decode + pool-descent skeleton);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -1228,6 +1229,27 @@ pub fn main_cli() {
                         }
                     }
                 }
+                // v0.30.0: the `.voc` root B-tree descent (roadmap v0.31.0) —
+                // the root node decode + the pool-descent skeleton
+                if !idx.lmu_voc.is_empty() {
+                    if let Some(tree) = crate::trident_voc::VocBTree::parse(&idx.lmu_voc) {
+                        if let Some(root) = tree.root_node(&idx.lmu_voc) {
+                            println!(
+                                "voc-B-tree (v0.30.0, FUN_10002b70): root=0x{:x} count={} \
+                                 ({} pool-children) · 0x40-flag {} · find() = \
+                                 pool-descent skeleton (node-pool pin deferred)",
+                                tree.root,
+                                root.count,
+                                root.children.iter().filter(|&&c| c < 3000).count(),
+                                if root.is_leaf40 {
+                                    "yes"
+                                } else {
+                                    "no"
+                                }
+                            );
+                        }
+                    }
+                }
                 // the exact `.vt` record stream + `.m` metadata header (v0.19.0)
                 if let Some(s) = &idx.vt_stream {
                     let runs: usize = s
@@ -1497,6 +1519,8 @@ pub fn main_cli() {
                  part-1 ops 0x40/41/42/45/48/49/FF + run_scan; 14160-record .vt stream runs, counter>=1 rate recorded). \\\
                   v0.29.0: FUN_100019f0 byte-VM part-2 (trident_vm::run_record — node-pool 0x43 + \\\
                   affix 0x46/47 + 0x49 soft-continue; 14160-record run, counter>=1 rate 0.738 recorded).\\\
+                  v0.30.0: .voc root B-tree (VocBTree::find — root-node decode + pool-descent \\\
+                  skeleton; «конституція» full resolution awaits the node-pool pin + FUN_100028e0).\\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

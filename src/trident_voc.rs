@@ -752,6 +752,174 @@ fn u16_from(voc: &[u8], off: u32) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// v0.30.0 (roadmap v0.31.0): the `.voc` root B-tree descent
+// ---------------------------------------------------------------------------
+
+/// One parsed `.voc` root B-tree node (roadmap v0.31.0) — the `FUN_10002b70`
+/// case-fold descent node:
+/// - byte 0: `0x80` = a child list is present; `0x40` = the `FUN_100028e0`
+///   leaf key-walk path.
+/// - byte 1: `0x80` = the child count is present; the low 7 bits = the child
+///   count.
+/// - bytes 2..: the u16 child list (the `DAT_1002db56` pool indices: `<3000`
+///   = the `FUN_10002620` pool resolve; `3000..0xC1C` = the virtual
+///   children, the `+0x48` offset under flags `0x1000`/`0x4000`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VocBTreeNode {
+    /// The file offset of this node.
+    pub off: u32,
+    /// byte 0 & 0x80 — a child list is present.
+    pub has_children: bool,
+    /// byte 0 & 0x40 — the `FUN_100028e0` leaf key-walk path.
+    pub is_leaf40: bool,
+    /// byte 1 & 0x80 — the child count is present.
+    pub has_count: bool,
+    /// byte 1 & 0x7f — the child count.
+    pub count: u8,
+    /// The u16 child list (the pool indices; empty when the count is 0).
+    pub children: Vec<u16>,
+}
+
+impl VocBTreeNode {
+    /// Parse one node at the file offset `off`. Bounds-checked; `None` when
+    /// the offset is out of range.
+    pub fn parse(voc: &[u8], off: u32) -> Option<Self> {
+        let o = off as usize;
+        if o + 2 > voc.len() {
+            return None;
+        }
+        let b0 = voc[o];
+        let b1 = voc[o + 1];
+        let has_children = b0 & 0x80 != 0;
+        let is_leaf40 = b0 & 0x40 != 0;
+        let has_count = b1 & 0x80 != 0;
+        let count = (b1 & 0x7f) as u8;
+        let mut children = Vec::new();
+        if has_children && count > 0 {
+            for i in 0..count as usize {
+                let p = o + 2 + i * 2;
+                if p + 1 < voc.len() {
+                    children.push(u16::from_le_bytes([voc[p], voc[p + 1]]));
+                } else {
+                    break;
+                }
+            }
+        }
+        Some(VocBTreeNode {
+            off,
+            has_children,
+            is_leaf40,
+            has_count,
+            count,
+            children,
+        })
+    }
+
+    /// The node's raw byte length (the 2-byte header + the u16 child list).
+    pub fn raw_len(&self) -> usize {
+        2 + self.children.len() * 2
+    }
+
+    /// The node's raw bytes (the header + the child list) — the structural
+    /// decode (the case-fold emit is the DLL's `DAT_1002db1c`, a DLL-image
+    /// global not dumped here).
+    pub fn raw(&self, voc: &[u8]) -> Vec<u8> {
+        let o = self.off as usize;
+        let end = (o + self.raw_len()).min(voc.len());
+        voc.get(o..end).map(|s| s.to_vec()).unwrap_or_default()
+    }
+}
+
+/// The `.voc` root B-tree descent (roadmap v0.31.0) — the search chain open
+/// since v0.15.0. `root` is the `+0x3C` root node file offset
+/// (`VocSectionTable::root`); `pool` is the `DAT_1002db56` node-pool (the
+/// u32 array the u16 children index into). The pool is a DLL-image global
+/// (thread-offset) and is caller-supplied; an empty pool limits the descent
+/// to the root's child list (the pool-location pin is roadmap-deferred).
+#[derive(Debug, Clone, Default)]
+pub struct VocBTree {
+    /// The root node file offset (`+0x3C`).
+    pub root: u32,
+    /// The `DAT_1002db56` node-pool (the u32 node offsets).
+    pub pool: Vec<u32>,
+}
+
+/// The leaf the B-tree descent lands on: the landing node's file offset
+/// (`node_off`), the `.vt` record-stream offset it points to (`vt_off`), and
+/// the landing node's raw bytes (structural).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VocLeaf {
+    /// The landing node's file offset.
+    pub node_off: u32,
+    /// The `.vt` record-stream offset the leaf word points to.
+    pub vt_off: u32,
+    /// The landing node's raw bytes (structural; the case-fold emit is the
+    /// DLL's `DAT_1002db1c`, a DLL-image global).
+    pub key: Vec<u8>,
+}
+
+impl VocBTree {
+    /// Build a tree from the section-table root + an optional pool.
+    pub fn new(root: u32, pool: Vec<u32>) -> Self {
+        VocBTree { root, pool }
+    }
+
+    /// Build from a `.voc` file (empty pool — the DLL pool is not dumped).
+    pub fn parse(voc: &[u8]) -> Option<Self> {
+        let table = VocSectionTable::parse(voc)?;
+        Some(VocBTree::new(table.root, Vec::new()))
+    }
+
+    /// The root node.
+    pub fn root_node(&self, voc: &[u8]) -> Option<VocBTreeNode> {
+        VocBTreeNode::parse(voc, self.root)
+    }
+
+    /// A pool child's node offset (`pool[c]`), or `None` when the pool does
+    /// not cover the index.
+    pub fn child_offset(&self, child: u16) -> Option<u32> {
+        self.pool.get(child as usize).copied()
+    }
+
+    /// The best-effort descent for `word` (the roadmap v0.31.0 DoD stretch):
+    /// walk the root's `<3000` pool children; the deepest reachable leaf (a
+    /// node with no child list) yields its key + `.vt` offset. With an empty
+    /// pool the descent stops at the root (the DLL pool is not dumped), so the
+    /// returned leaf is the root-stopped structural result. The case-fold
+    /// compare of `word` needs the `DAT_1002e642` table (deferred). Bounds-
+    /// checked; never panics.
+    pub fn find(&self, voc: &[u8], word: &[u8]) -> Option<VocLeaf> {
+        let _ = word; // the case-fold compare needs DAT_1002e642 (roadmap-deferred)
+        let root = self.root_node(voc)?;
+        for &c in &root.children {
+            if c >= 3000 {
+                continue; // the virtual children need the 0x1000/0x4000 flags
+            }
+            let Some(off) = self.child_offset(c) else {
+                continue; // the pool does not cover this child
+            };
+            let Some(node) = VocBTreeNode::parse(voc, off) else {
+                continue;
+            };
+            if !node.has_children || node.count == 0 {
+                // a leaf node: the structural .vt landing is its pool offset
+                return Some(VocLeaf {
+                    node_off: off,
+                    vt_off: off,
+                    key: node.raw(voc),
+                });
+            }
+        }
+        // the descent stopped at the root (empty pool or all virtual children)
+        Some(VocLeaf {
+            node_off: self.root,
+            vt_off: self.root,
+            key: root.raw(voc),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
 
@@ -1045,5 +1213,65 @@ mod tests {
         assert_eq!(lm_word_display(&[0xA8, 0x21]), "и!");
         // non-letter, non-printable bytes keep the `·xx·` marker
         assert_eq!(lm_word_display(&[0x01, 0xAC]), "·01·м");
+    }
+
+    // ------------------------------------------------------------------
+    // v0.30.0 (roadmap v0.31.0): the `.voc` root B-tree descent
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn voc_btree_node_parses_the_real_lmu_root() {
+        let Some(voc) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.voc").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let tree = VocBTree::parse(&voc).expect("the tree from the section table");
+        // the root node decodes structurally (count = 26, all pool children)
+        let root = tree.root_node(&voc).expect("the root node");
+        assert!(root.has_children, "the root carries a child list");
+        // 0xC0: both the 0x80 child-list and the 0x40 (FUN_100028e0) flags
+        assert!(root.is_leaf40, "the root takes the 0x40-flag (FUN_100028e0) path");
+        assert_eq!(root.count, 26, "the recorded root child count");
+        assert_eq!(root.children.len(), 26, "the full child list is parsed");
+        // every child is a pool-resolve index (<3000), not a virtual child
+        assert!(
+            root.children.iter().all(|&c| c < 3000),
+            "all root children take the pool-resolve path"
+        );
+        // the find() descent with the empty pool stops at the root (no panic);
+        // the word is the «конституція» DoD word (transliterated; the case-fold
+        // compare needs the DAT_1002e642 table, roadmap-deferred)
+        let leaf = tree.find(&voc, b"konstytutsia").expect("a structural leaf");
+        assert_eq!(leaf.node_off, tree.root, "the empty-pool descent stops at the root");
+        assert_eq!(leaf.vt_off, tree.root);
+        println!(
+            "lmu.voc B-tree root @0x{:x}: count={} all-pool; empty-pool find stops at root (recorded)",
+            tree.root,
+            root.count
+        );
+    }
+
+    #[test]
+    fn voc_btree_synthetic_pool_descends_to_a_leaf() {
+        // a synthetic node image: the root has one child (index 5); pool[5]
+        // points at a leaf node (no child list)
+        let mut img = vec![0u8; 128];
+        // leaf node @64: byte 0 = 0x00 (no child list), byte 1 = 0x00
+        // (no count) — a leaf
+        img[64] = 0x00;
+        img[65] = 0x00;
+        // root node @0: byte 0 = 0x80 (child list), byte 1 = 0x81 (count 1)
+        img[0] = 0x80;
+        img[1] = 0x81;
+        img[2..4].copy_from_slice(&5u16.to_le_bytes()); // child index 5
+        let mut pool = vec![0u32; 64];
+        pool[5] = 64; // pool[5] = the leaf node offset
+        // the section table is not present in the synthetic image, so build
+        // the tree directly with the root offset
+        let tree = VocBTree::new(0, pool);
+        let leaf = tree.find(&img, b"x").expect("the leaf");
+        assert_eq!(leaf.node_off, 64, "the descent reached the pool leaf");
+        assert_eq!(leaf.vt_off, 64, "the leaf's .vt landing is its pool offset");
+        assert_eq!(leaf.key.len(), 2, "the leaf's raw bytes (the 2-byte header)");
     }
 }

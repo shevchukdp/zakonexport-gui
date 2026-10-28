@@ -534,6 +534,9 @@ pub struct TridentIndex {
     pub rus_vt_u16: Vec<u16>,
     /// the morphology weight table from `.gw` (raw u16, 0x8000 flag bit)
     pub gw_u16: Vec<u16>,
+    /// the raw `lmu.voc` bytes (v0.30.0: the B-tree descent re-parses the
+    /// `+0x3C` root node against these; empty when the `.voc` is absent)
+    pub lmu_voc: Vec<u8>,
     /// the decoded `.voc` morphology tables (section table, affixes, suffix
     /// endings, digitraphs, list counts) — `None` when the `.voc` is absent
     pub morphology: Option<crate::trident_voc::Morphology>,
@@ -742,6 +745,7 @@ impl TridentIndex {
             rus_dict_words: rus_dict_words.unwrap_or_default(),
             rus_vt_u16,
             gw_u16,
+            lmu_voc: voc,
             morphology,
             graph,
             vt_stream,
@@ -1383,6 +1387,7 @@ mod tests {
             rus_dict_words: Vec::new(),
             rus_vt_u16: Vec::new(),
             gw_u16: Vec::new(),
+            lmu_voc: Vec::new(),
             morphology: None,
             graph: None,
             vt_stream: None,

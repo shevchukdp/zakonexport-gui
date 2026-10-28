@@ -40,6 +40,7 @@ Usage:
           .voc dense nodes (v0.31.0: 4096-resync 15 slots + 722/2157 listA/listB reconciliation);
           .voc 'f' opcode-VM (v0.32.0: FUN_100044f0 142 programs, run_f_program + count invariant);
           .g graph-template walker (v0.33.0: FUN_10019060 0x27-vertex/0x2d-edge markers + .gw weight map);
+          exact Latin mapping (v0.34.0: latin_exact preferred-variant exact path + real-corpus .vt hit rate);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -1542,6 +1543,17 @@ pub fn main_cli() {
                         gw_edge_flag
                     );
                 }
+                // v0.34.0: the exact Latin mapping (roadmap v0.35.0) — the
+                // preferred-variant exact path + the real-corpus `.vt` hit
+                // rate (part-1 structural; 100% awaits the part-2 graph norm)
+                let (hx, ht) = idx.exact_latin_hit_rate();
+                println!(
+                    "latin-exact (v0.34.0, roadmap v0.35.0): {} mappable \
+                     stems · exact .vt hit {} (part-1 rate; 100% awaits \
+                     DAT_1002f1f0 graph norm)",
+                    ht,
+                    hx
+                );
             }
             println!();
             println!(
@@ -1582,6 +1594,8 @@ pub fn main_cli() {
                   Morphology.f_programs report; 142/142 terminate at 0x1002, 176 word-leaf hits). \\\
                   v0.33.0: .g graph-template walker (GGraph::walk - FUN_10019060 0x27-vertex/0x2d-edge markers + map_gw_weights lmu.gw->edges) \\\
                   31v/26e lmu.g, 37v/47e lmr.g, consumed == stream_u16, .gw flagged edges) \\\
+                  v0.34.0: .g exact-Latin mapping (latin_exact - preferred-variant exact path, uncapped; LATIN_VARIANTS demoted to documented fallback) \\\
+                  exact_postings prefers the exact candidate; real-corpus .vt hit rate recorded (100% awaits the DAT_1002f1f0 graph norm). \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

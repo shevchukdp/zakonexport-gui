@@ -403,8 +403,12 @@ pub fn encode_term(term: &str, fold: &Fold) -> (Vec<u8>, u32, u32) {
 /// The mapping is **context-dependent** (н maps to `N` in «не» but to `H`
 /// in «неч»; в maps to `V` in «був» but `W`/`B` elsewhere — the stems are
 /// graph-normalized through `lmu.g`), so this table carries *preferred*
-/// variants first plus the observed alternates; [`latin_candidates`]
-/// expands them breadth-first with a cap.
+/// variants first plus the observed alternates. **Demotion (v0.34.0,
+/// roadmap v0.35.0):** the *first* entry of each row is the **exact**
+/// mapping (used by [`latin_exact`]); the remaining alternates are the
+/// **documented fallback** explored by [`latin_candidates`] only for the
+/// ambiguous letters. EN: row[0] = the deterministic exact mapping; the rest
+/// = the alternates the capped BFS fallback still explores.
 const LATIN_VARIANTS: &[(char, &[&str])] = &[
     ('а', &["A"]),
     ('б', &["B"]),
@@ -490,6 +494,40 @@ pub fn latin_candidates(bytes: &[u8]) -> Vec<String> {
     // drop empties (a word made only of ь/ъ under their empty variant)
     cands.retain(|s| !s.is_empty());
     cands
+}
+
+/// The **deterministic, uncapped** exact Latin mapping of a LmCode word
+/// (v0.34.0, roadmap v0.35.0): each letter maps to its *preferred* variant
+/// (the first entry of [`LATIN_VARIANTS`]), digits pass through verbatim,
+/// and an unmappable byte yields `None` for the whole word. Unlike
+/// [`latin_candidates`] (the capped BFS over *all* variants — the documented
+/// fallback for the ambiguous letters), this is a **total function**: exactly
+/// one `String` per word, with no multiplicative candidate explosion.
+///
+/// The ambiguous letters (н/в/о/ж/з/…) resolve to their *preferred*
+/// variant here; the graph-template walker (roadmap v0.34.0) supplies the
+/// context-dependent override (the part-2 `DAT_1002f1f0` DLL-image pin).
+/// EN: a total `bytes -> String` mapping (preferred variant per letter);
+/// `None` only when a byte is not mappable at all.
+pub fn latin_exact(bytes: &[u8]) -> Option<String> {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for &b in bytes {
+        if b.is_ascii_digit() {
+            // digits pass through verbatim (they sort before letters, exactly
+            // as in the dictionary)
+            out.push(b as char);
+            continue;
+        }
+        let Some(c) = lm_byte_to_char(b) else {
+            return None; // unmappable byte
+        };
+        let Some((_, vs)) = LATIN_VARIANTS.iter().find(|(lc, _)| *lc == c) else {
+            return None;
+        };
+        // the preferred variant (the first entry) — the exact mapping
+        out.push_str(vs[0]);
+    }
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,8 +1101,22 @@ impl TridentIndex {
             return Vec::new();
         }
         let cands = latin_candidates(&bytes);
+        // v0.34.0 (roadmap v0.35.0): prefer the deterministic exact path —
+        // the single preferred-variant mapping (`latin_exact`) comes first,
+        // then the capped-BFS alternates (`latin_candidates`) that it
+        // didn't cover. When the exact candidate maps to nothing, the
+        // fallback alternates still run (documented either way).
+        let mut ordered: Vec<String> = Vec::new();
+        if let Some(ex) = latin_exact(&bytes) {
+            ordered.push(ex);
+        }
+        for c in &cands {
+            if !ordered.iter().any(|o| o == c) {
+                ordered.push(c.clone());
+            }
+        }
         let mut out: Vec<(String, usize, Vec<u16>)> = Vec::new();
-        for cand in &cands {
+        for cand in &ordered {
             if out.len() >= 32 {
                 break;
             }
@@ -1083,6 +1135,36 @@ impl TridentIndex {
             }
         }
         out
+    }
+
+    /// The real-corpus exact-mapping hit rate (v0.34.0, roadmap v0.35.0):
+    /// for each dictionary stem, apply [`latin_exact`] and check whether the
+    /// exact Latin candidate lands in the `.vt` record stream. Returns
+    /// `(hits, total)` where `total` = the stems that map at all (mappable)
+    /// and `hits` = the ones whose exact candidate is present in the stream.
+    ///
+    /// The full 100 % rate awaits the part-2 `DAT_1002f1f0` graph
+    /// normalization (the context-dependent letter overrides); the recorded
+    /// rate is the part-1 structural figure (the preferred-variant mapping
+    /// already resolves every *unambiguous* letter). EN: the exact-candidate
+    /// hit count over the real `lmu.voc` dictionary stems, against the
+    /// `lmur.vt` stream.
+    pub fn exact_latin_hit_rate(&self) -> (usize, usize) {
+        let Some(stream) = &self.vt_stream else {
+            return (0, 0);
+        };
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        for word in &self.dict_words {
+            let Some(ex) = latin_exact(word) else {
+                continue; // unmappable stem (not counted)
+            };
+            total += 1;
+            if !stream.find_stem(&ex).is_empty() {
+                hits += 1;
+            }
+        }
+        (hits, total)
     }
 }
 
@@ -1518,6 +1600,55 @@ mod tests {
         assert_eq!(latin_candidates(&[0xAF, 0x33, 0x30]), vec!["P30".to_string()]);
         // an unmappable byte yields no candidates
         assert!(latin_candidates(&[0x01]).is_empty());
+    }
+
+    #[test]
+    fn latin_exact_maps_the_preferred_variant() {
+        // the deterministic single-variant mapping (v0.34.0): each letter
+        // takes its preferred (first) variant — the exact path
+        assert_eq!(latin_exact(&[0xAD, 0xA5]), Some("NE".to_string()), "н→N");
+        assert_eq!(latin_exact(&[0xAF, 0xAE]), Some("PO".to_string()), "о→O");
+        assert_eq!(
+            latin_exact(&[0xA1, 0xE3, 0xA2]),
+            Some("BUV".to_string()),
+            "в→V"
+        );
+        // digits pass through verbatim
+        assert_eq!(
+            latin_exact(&[0xAF, 0x33, 0x30]),
+            Some("P30".to_string()),
+            "P30 digits"
+        );
+        // an unmappable byte yields None (the whole word)
+        assert_eq!(latin_exact(&[0x01]), None);
+        // the exact candidate is always the FIRST candidate of the BFS
+        // fallback (the ordering invariant exact_postings_in relies on)
+        for stem in [vec![0xAD, 0xA5], vec![0xAF, 0xAE], vec![0xA1, 0xE3, 0xA2]] {
+            let ex = latin_exact(&stem).unwrap();
+            let cands = latin_candidates(&stem);
+            assert_eq!(cands.first().map(|s| s.as_str()), Some(ex.as_str()), "exact first");
+        }
+    }
+
+    #[test]
+    fn exact_latin_hit_rate_on_the_real_corpus() {
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let idx = TridentIndex::open(baza).expect("index should load");
+        let (hits, total) = idx.exact_latin_hit_rate();
+        assert!(total > 0, "the dictionary has mappable stems");
+        assert!(hits > 0, "some exact candidates land in the .vt stream");
+        // the confirmed v0.19.0 anchors stay valid through the exact path
+        assert!(!idx.exact_postings("був").is_empty(), "BUV anchor");
+        assert!(!idx.exact_postings("пере").is_empty(), "PERE anchor");
+        // the part-1 structural rate is recorded (the part-2 graph
+        // normalization is what lifts it toward 100 %)
+        eprintln!(
+            "exact-latin hit rate (lmu.voc stems -> lmur.vt): {hits}/{total}"
+        );
     }
 
     #[test]

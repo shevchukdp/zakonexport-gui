@@ -935,6 +935,74 @@ pub fn main_cli() {
             Ok(())
         })(),
         "trident" => (|| {
+            // v0.21.0: the `trident dump <file> [off] [len]` hex-dump
+            // sub-verb — resolves <file> against <baza>\SOFT\ (falling
+            // back to <baza>\), prints 16-byte-per-line hex + latin1.
+            // A console-only RE helper that accelerates every later
+            // Trident decode step.
+            if o.positional.first().map(|s| s.as_str()) == Some("dump") {
+                let name = o.positional.get(1).cloned().unwrap_or_default();
+                if name.is_empty() {
+                    println!("trident dump <файл> [офс] [довжина] — приклад: trident dump lmur.m 0x70e 0x40");
+                    return Ok(());
+                }
+                require_baza(&o)?;
+                let soft_p = o.baza.join("SOFT").join(&name);
+                let p = if soft_p.is_file() {
+                    soft_p
+                } else {
+                    o.baza.join(&name)
+                };
+                let buf = match std::fs::read(&p) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        println!(
+                            "файл не читається: {}: {}",
+                            p.display(),
+                            e
+                        );
+                        return Ok(());
+                    }
+                };
+                let parse_u = |s: &str| {
+                    if let Some(h) = s.strip_prefix("0x") {
+                        u32::from_str_radix(h, 16).ok()
+                    } else {
+                        s.parse::<u32>().ok()
+                    }
+                };
+                let off = parse_u(o.positional.get(2).map(|s| s.as_str()).unwrap_or("0")).unwrap_or(0);
+                let len = parse_u(o.positional.get(3).map(|s| s.as_str()).unwrap_or("0x40")).unwrap_or(0x40);
+                let start = (off as usize).min(buf.len());
+                let end = start
+                    .saturating_add(len as usize)
+                    .min(buf.len());
+                println!(
+                    "{}: {} Б (off=0x{:x} len=0x{:x})",
+                    name,
+                    buf.len(),
+                    start,
+                    end.saturating_sub(start)
+                );
+                let mut row = start;
+                while row < end {
+                    let n = (row + 16).min(end);
+                    let hx: Vec<String> = (row..n).map(|i| format!("{:02x}", buf[i])).collect();
+                    let asc: String = (row..n)
+                        .map(|i| {
+                            let b = buf[i];
+                            if (0x20..0x7f).contains(&b) {
+                                b as char
+                            } else {
+                                '·'
+                            }
+                        })
+                        .collect();
+                    println!("0x{:08x}  {}  |{}|", row, hx.join(" "), asc);
+                    row = n;
+                }
+                return Ok(());
+            }
             // The legacy main app's native FTS indexes (SOFT\): the 16-file
             // inventory plus the parts decoded today — the windows.kod code
             // table, the lm.a case-fold tables, the dictionary records and
@@ -1066,12 +1134,44 @@ pub fn main_cli() {
                     let table: Vec<String> =
                         m.table.iter().map(|v| format!("0x{v:x}")).collect();
                     println!(
-                        "lmur.m: {} — метадані за словами (0xE-структури \
-                         FUN_100177d0) · u32-таблиця @0x40: {} · хвіст @0x{:x}",
+                        "lmur.m: {} — метадані за словами (v0.21.0: 16-slot \
+                         u32-таблиця @0x40..0x80): {} · хвіст @0x{:x}",
                         m.header.name,
                         table.join(" "),
                         m.header.tail,
                     );
+                    if let (Some(pred), Some(word)) = (m.pred_off(), m.word_off()) {
+                        println!(
+                            "  slot5 = u16 predicate-таблиця @0x{pred:x} \
+                             (ctx+0x44, FUN_100176c0) · slot11 = u16 word-\
+                             таблиця @0x{word:x} (ctx+0x30) · u32@0x80=0x{u80:x} \
+                             u32@0x84=0x{u84:x} (інваріант: u84 = pred − 7)",
+                            u80 = m.u80,
+                            u84 = m.u84,
+                        );
+                    }
+                    if let Some(ts) = &m.tail {
+                        let recs: Vec<String> = ts
+                            .records
+                            .iter()
+                            .map(|r| {
+                                let key = String::from_utf8_lossy(&r.key);
+                                let list: Vec<String> = r
+                                    .list
+                                    .iter()
+                                    .map(|u| format!("0x{u:x}"))
+                                    .collect();
+                                format!("{key}→[{}]", list.join(","))
+                            })
+                            .collect();
+                        println!(
+                            "  tail N-секція (FUN_100134d0) @0x{:x}: N={} — {} \
+                             (wildcard-ключі tail_match: N/R/L/*)",
+                            m.header.tail,
+                            ts.count,
+                            recs.join(" "),
+                        );
+                    }
                 }
                 // v0.20.0: the Russian streams + the usage-flags file
                 if let Some(s) = &idx.rus_vt_stream {
@@ -1087,12 +1187,42 @@ pub fn main_cli() {
                     let table: Vec<String> =
                         m.table.iter().map(|v| format!("0x{v:x}")).collect();
                     println!(
-                        "lmru.m: {} — rus метадані · u32-таблиця @0x40: {} · \
-                         хвіст @0x{:x}",
+                        "lmru.m: {} — rus метадані (v0.21.0: 16-slot \
+                         u32-таблиця @0x40..0x80): {} · хвіст @0x{:x}",
                         m.header.name,
                         table.join(" "),
                         m.header.tail,
                     );
+                    if let (Some(pred), Some(word)) = (m.pred_off(), m.word_off()) {
+                        println!(
+                            "  slot5 = u16 predicate-таблиця @0x{pred:x} · \
+                             slot11 = u16 word-таблиця @0x{word:x} · u32@0x80=\
+                             0x{u80:x} u32@0x84=0x{u84:x} (u84 = pred − 7)",
+                            u80 = m.u80,
+                            u84 = m.u84,
+                        );
+                    }
+                    if let Some(ts) = &m.tail {
+                        let recs: Vec<String> = ts
+                            .records
+                            .iter()
+                            .map(|r| {
+                                let key = String::from_utf8_lossy(&r.key);
+                                let list: Vec<String> = r
+                                    .list
+                                    .iter()
+                                    .map(|u| format!("0x{u:x}"))
+                                    .collect();
+                                format!("{key}→[{}]", list.join(","))
+                            })
+                            .collect();
+                        println!(
+                            "  tail N-секція @0x{:x}: N={} — {}",
+                            m.header.tail,
+                            ts.count,
+                            recs.join(" "),
+                        );
+                    }
                 }
                 if let Some(u) = &idx.use_flags {
                     println!(
@@ -1117,8 +1247,8 @@ pub fn main_cli() {
                         .and_then(|b| crate::trident_vt::VtTailScan::parse(&b, s.end));
                     println!(
                         "tail-scan (FUN_100134d0) @0x{:x}: N={} (old-format .vt — \
-                         хвіст порожній; u16 word/predicate-таблиці виводяться з \
-                         .voc B-tree — далі (v0.21+))",
+                         хвіст порожній; u16 word/predicate-таблиці виявлено у \
+                         .m: slot5/slot11 16-slot-таблиці — v0.21.0)",
                         s.end,
                         ts.as_ref().map(|t| t.count).unwrap_or(0),
                     );
@@ -1166,14 +1296,16 @@ pub fn main_cli() {
             println!(
                 "Пошук нативним індексом — tsearch (експеримент); морфологія \
                  lmu.voc (афікси, суфікси/кінцівки, двозначники, таблиця секцій) — \
-v0.17.0; записники lmu.voc (FUN_10004230 record-walker: кордони record-ів + \
-block-resync packed B-tree) — v0.18.0; граф lmu.g — структурно декодовано, \
-v0.19.0: точний stem-join word→.vt (posting record stream lmur.vt + header \
+                 v0.17.0; записники lmu.voc (FUN_10004230 record-walker: кордони record-ів + \
+                 block-resync packed B-tree) — v0.18.0; граф lmu.g — структурно декодовано, \
+                 v0.19.0: точний stem-join word→.vt (posting record stream lmur.vt + header \
                  lmur.m + параметри lmu.voc @0x80); семантика ребер lmu.g + \
-B-tree-VM хвоста (FUN_100019f0) — далі (v0.21); v0.20.0: tail-scan \
-                 (FUN_100134d0 — у old-format .vt N=0, хвіст порожній) + \
-                 wildcard-матчер (FUN_100135d0) + .use usage-прапорці \
-                 (body=0) + rus-стріми lmru.vt/lmru.m (14421 record-ів). \
+                 B-tree-VM хвоста (FUN_100019f0) — далі (v0.29+); v0.20.0: tail-scan \
+                 (FUN_100134d0 — у old-format .vt N=0, хвіст порожній) + wildcard-матчер \
+                 (FUN_100135d0) + .use (body=0, write-mode cache) + rus-стріми \
+                 (14421 record-ів); v0.21.0: 16-slot .m-таблиця (slot5 = u16 predicate, \
+                 slot11 = u16 word) + tail N-секція .m (N=3 ukr/N=4 rus) + trident \
+                 dump <файл> [офс] [довжина]. \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

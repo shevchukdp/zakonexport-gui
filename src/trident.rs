@@ -525,8 +525,11 @@ pub struct TridentIndex {
     /// the exact `.vt` record stream (14160 packed NUL records
     /// `0x40..header[0x3C]`, v0.19.0) — `None` when the stream walk fails
     pub vt_stream: Option<crate::trident_vt::VtRecordStream>,
-    /// the `.m` per-word metadata header (64-byte header + the u32 table
-    /// @0x40, v0.19.0) — `None` when `lmur.m` is absent
+    /// the `.m` per-word metadata header (v0.21.0 full decode: 64-byte
+    /// header + the 16-slot u32 table @0x40..0x80 + the u32 fields
+    /// @0x80/0x84 + the tail N-section with the `tail_match` wildcard
+    /// keys; slot 5 = the u16 predicate table, slot 11 = the u16 word
+    /// table) — `None` when `lmur.m` is absent
     pub vm_header: Option<crate::trident_vt::VmHeader>,
     /// the Russian `.vt` record stream (`lmru.vt`, v0.20.0) — the same
     /// packed grammar, Latin stems of the `lmr.voc` dictionary
@@ -612,14 +615,14 @@ impl TridentIndex {
         let vt_stream = crate::trident_vt::VtRecordStream::parse(&vt);
         let vm_header = read("lmur.m")
             .as_deref()
-            .and_then(|m| crate::trident_vt::VmHeader::parse(m, 8));
+            .and_then(crate::trident_vt::VmHeader::parse);
         // the Russian streams + the usage-flags file (v0.20.0)
         let rus_vt_stream = read("lmru.vt").as_deref().and_then(
             crate::trident_vt::VtRecordStream::parse,
         );
         let rus_vm_header = read("lmru.m")
             .as_deref()
-            .and_then(|m| crate::trident_vt::VmHeader::parse(m, 8));
+            .and_then(crate::trident_vt::VmHeader::parse);
         let use_flags = read("lmu.use")
             .as_deref()
             .and_then(crate::trident_vt::UseFile::parse);

@@ -104,6 +104,102 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.21.0 — 2026-10-28
+
+### UK
+- **Повний заголовок `.m` декодовано (v0.21.0 finding): u32-таблиця
+  має **16 слотів, а не 8** (v0.19.0 читав першу половину).** Емпіричні
+  дампи `lmur.m`/`lmru.m` зафіксували ролі слотів: **slot 5 = u16
+  predicate-таблиця** (0x206D ukr / 0x1ACF rus — саме `ctx+0x44`, яку
+  ходить `FUN_100176c0`/`FUN_10015cd0`), **slot 11 = u16 word-таблиця**
+  (0x37CB ukr / 0x3001 rus — `ctx+0x30`). Висновок, що розблоковує
+  blocked item #1: u16 word/predicate-таблиці лежать **у файлах `.m`,
+  а не в хвості `.vt`** (old-format `.vt` хвости порожні — v0.20.0) і не
+  виводяться з B-tree `.voc`.
+- **Tail N-секція `.m` НЕ порожня (на відміну від `.vt`)** — `VmHeader`
+  тепер парсить її вбудовано (`VtTailScan`): `lmur.m` @0x70E: **N=3**
+  (`"R"→[0x1]`, `"N*"→[0x1C,0x3E]`, `"*"→[0x3E,0x14]`), `lmru.m`
+  @0x53E: **N=4** (додатковий запис `"*N"→[0x24,0x0E,0x26,0x1D,0x3E]`).
+  Це wildcard-ключі, які `tail_match` (v0.20.0) доповнює у повний
+  word → u16 word-index join.
+- **Два похідні поля заголовка зафіксовано міжмовним інваріантом**:
+  `u32@0x84 = pred_off − 7` (0x2066+7=0x206D; 0x1AC8+7=0x1ACF) та
+  `u32@0x80 = pred_off − 19` (обидва поля різняться на 12). Семантика
+  0xE-структур (`0x8C..`) — наступний RE-крок (v0.22+).
+- **U16 word-таблиця структурно ідентифікована**: `[u16 count]` +
+  `count` відносних u16 офсетів, які рівно заповнюють секцію до
+  вказівника slot 12 (ukr: count=0xFE=254, секція 0x37CB..0x39C9;
+  rus: count=0x100=256, секція 0x3001..0x3203). Predicate-таблиця —
+  чистий уростальний u16-масив (ukr 0x206D: 0x013E 0x0154 0x0164
+  0x0170 …). Повний structural decode (kind-байти 0xFA/0x33) — v0.22.0.
+- **CLI `trident dump <файл> [офс] [довжина]`** — новий console-only
+  hex-dump sub-verb (16 байтів/рядок + latin1; `<файл>` шукатиметься в
+  `SOFT\`, потім в корені бази). Прискорює кожен наступний RE-крок.
+- **Документація по `.use`/`.uvt` (RE-факти з `lmsup32.dll`)**:
+  `lmC.use` (C = мова) відкривається **в write-режимі**
+  (`FUN_10011b20(..., 0x40, 0, 'W')`, fallback `FUN_10011e10(...,
+  0x40, 0xCC, 'W')` — саме 204-байтова форма наших файлів) → `.use` це
+  **write-back cache**, а не read-стрім (у read-only базі — нульовий);
+  `.uvt` відкривається лише `'W'` (а `.vt` — `'R'`) → update-cache
+  зарезервовано й ніколи не писалося.
+- **CLI `trident`** — оновлені блоки: 16-slot таблиці + slot5/slot11 +
+  u80/u84 + tail N-секції для `lmur.m`/`lmru.m`; tail-scan рядок тепер
+  вказує, що u16 таблиці виявлено в `.m`.
+- **132 юніт-тестів** (нові: повна 16-slot таблиця + tail N-секції для
+  обох мов, u80/u84-інваріанти, count+offsets shape word-таблиці,
+  ascending predicate-масив). Guitest baseline `rows=430` без змін.
+  Версія **0.20.0 → 0.21.0**.
+
+### EN
+- **The full `.m` header decoded (v0.21.0 finding): the u32 table has
+  **16 slots, not 8** (the v0.19.0 parse was the first half).** The
+  empirical dumps of `lmur.m`/`lmru.m` pin the slot roles: **slot 5 =
+  the u16 predicate table** (0x206D ukr / 0x1ACF rus — the `ctx+0x44`
+  table `FUN_100176c0`/`FUN_10015cd0` walks) and **slot 11 = the u16
+  word table** (0x37CB ukr / 0x3001 rus — `ctx+0x30`). Conclusion that
+  unblocks blocked item #1: the u16 word/predicate tables live **in
+  the `.m` files, not the `.vt` tail** (the old-format `.vt` tails are
+  empty — v0.20.0) and are not derived from the `.voc` B-tree.
+- **The `.m` tail N-section is NOT empty (unlike `.vt`)** —
+  `VmHeader` now parses it inline (`VtTailScan`): `lmur.m` @0x70E:
+  **N=3** (`"R"→[0x1]`, `"N*"→[0x1C,0x3E]`, `"*"→[0x3E,0x14]`),
+  `lmru.m` @0x53E: **N=4** (the extra record
+  `"*N"→[0x24,0x0E,0x26,0x1D,0x3E]`). These are the wildcard keys
+  that `tail_match` (v0.20.0) completes into the word → u16
+  word-index join.
+- **Two derived header fields pinned by the cross-language
+  invariant**: `u32@0x84 = pred_off − 7` (0x2066+7=0x206D;
+  0x1AC8+7=0x1ACF) and `u32@0x80 = pred_off − 19` (the two fields
+  differ by 12). The 0xE-structure semantics (`0x8C..`) — the next RE
+  step (v0.22+).
+- **The u16 word table structurally identified**: a `[u16 count]` +
+  `count` relative u16 offset array that exactly fills the section up
+  to the slot-12 pointer (ukr: count=0xFE=254, section
+  0x37CB..0x39C9; rus: count=0x100=256, section 0x3001..0x3203). The
+  predicate table is a plain ascending u16 array (ukr 0x206D: 0x013E
+  0x0154 0x0164 0x0170 …). The full structural decode (the 0xFA/0x33
+  kind bytes) is v0.22.0.
+- **CLI `trident dump <file> [off] [len]`** — a new console-only
+  hex-dump sub-verb (16 bytes/line + latin1; `<file>` resolves against
+  `SOFT\`, then the base root). Accelerates every later RE step.
+- **`.use`/`.uvt` documentation (RE facts from `lmsup32.dll`)**:
+  `lmC.use` (C = the language char) is opened **in write mode**
+  (`FUN_10011b20(..., 0x40, 0, 'W')`, fallback `FUN_10011e10(...,
+  0x40, 0xCC, 'W')` — the exact 204-byte form of our files) → `.use`
+  is a **write-back cache**, not a read stream (zero in this
+  read-only base); `.uvt` opens `'W'` only (vs `.vt` `'R'`) → the
+  update cache is reserved and never written.
+- **CLI `trident`** — updated blocks: the 16-slot tables + slot5/
+  slot11 + u80/u84 + the tail N-sections for `lmur.m`/`lmru.m`; the
+  tail-scan line now points to the u16 tables found in the `.m`.
+- **132 unit tests** (new: the full 16-slot table + the tail
+  N-sections for both languages, the u80/u84 invariants, the
+  count+offsets word-table shape, the ascending predicate array). The
+  guitest baseline `rows=430` is unchanged. Version **0.20.0 →
+  0.21.0**.
+
+---
+
 ## v0.20.0 — 2026-10-28
 
 ### UK

@@ -101,6 +101,25 @@
 //! this base. The Russian streams (`lmru.vt` / `lmru.m`) follow the
 //! exact same grammar (14421 records, `NET`/`PER`/`PO` stems
 //! confirmed) and are loaded alongside the Ukrainian ones.
+//!
+//! ## v0.21.0: the `.m` full header — the u16 tables are in the `.m`
+//!
+//! The `.m` u32 table has **16 slots, not 8** (the v0.19.0 parse was
+//! the first half). The empirical dumps pin the roles: **slot 5 =
+//! the u16 predicate table** (`ctx+0x44`, `FUN_100176c0`/
+//! `FUN_10015cd0`; 0x206D ukr / 0x1ACF rus) and **slot 11 = the u16
+//! word table** (`ctx+0x30`; 0x37CB ukr / 0x3001 rus). The u16
+//! tables therefore live in the `.m` files, not the `.vt` tail (and
+//! not the `.voc` B-tree as v0.20.0 suspected). The `.m` tail
+//! N-section is NON-empty — `VtTailScan` now parses it as part of
+//! `VmHeader` (N=3 ukr: "R", "N*", "*"; N=4 rus: adds "*N") — the
+//! `tail_match` wildcard keys. Two derived header fields are pinned
+//! by the cross-language invariant: `u32@0x84 = pred_off - 7` and
+//! `u32@0x80 = pred_off - 19`. The `trident dump` CLI verb ships the
+//! hex-dump helper for the next RE steps; the `.use` files are the
+//! engine's **write-mode** update caches (`lmC.use` opened 'W', the
+//! 204-byte `FUN_10011e10` form) and `.uvt` opens 'W' only — both
+//! reserved/never-written in this read-only base.
 
 /// The 64-byte header common to `.vt` and `.m` files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,30 +252,86 @@ impl VtRecordStream {
     }
 }
 
-/// The `.m` per-word metadata header: the 64-byte file header plus the
-/// u32 section table at `0x40`.
+/// The `.m` per-word metadata header (v0.21.0 full decode): the
+/// 64-byte file header, the **16-entry** u32 section table at
+/// `0x40..0x80`, the two derived u32 fields at `0x80`/`0x84`, and
+/// the parsed `FUN_100134d0` tail N-section (the wildcard join
+/// substrate of `tail_match`).
+///
+/// **v0.21.0 empirical findings (both languages):**
+/// - the table has 16 slots, not 8 — the earlier 8-entry parse was
+///   the first half;
+/// - **slot 5 = the u16 predicate table** offset (`ctx+0x44`,
+///   `FUN_100176c0`/`FUN_10015cd0`): 0x206D ukr, 0x1ACF rus;
+/// - **slot 11 = the u16 word table** offset (`ctx+0x30`): 0x37CB
+///   ukr, 0x3001 rus;
+/// - the u16 word/predicate tables therefore live **in the `.m`
+///   files, not the `.vt` tail** (the old-format `.vt` tails are
+///   empty, v0.20.0);
+/// - `u32@0x84` is the verified invariant `pred_off - 7` in both
+///   files (0x2066+7=0x206D; 0x1AC8+7=0x1ACF), and
+///   `u32@0x80 = pred_off - 19` (the two fields differ by 12);
+/// - the tail N-section is NOT empty for `.m` (unlike `.vt`):
+///   N=3 for `lmur.m` ("R", "N*", "*"), N=4 for `lmru.m`
+///   (adds "*N") — the `tail_match` wildcard keys that complete the
+///   word → u16 word-index join.
 #[derive(Debug, Clone)]
 pub struct VmHeader {
     /// The parsed 64-byte file header.
     pub header: TridentFileHeader,
-    /// The u32 section table at `0x40` (`lmur.m`: 8 entries).
+    /// The 16-entry u32 section table at `0x40..0x80`. Verified slot
+    /// roles: 5 = the u16 predicate table, 11 = the u16 word table;
+    /// the other slots start the 0xE-structure metadata sections
+    /// (the packed stream from `0x8C`, `FUN_100177d0`).
     pub table: Vec<u32>,
+    /// The u32 at `0x80` — observed as `pred_off - 19` in both
+    /// real files (the end of the preceding section; semantics
+    /// pending the 0xE-structure decode, v0.22+).
+    pub u80: u32,
+    /// The u32 at `0x84` — the verified invariant `pred_off - 7`.
+    pub u84: u32,
+    /// The parsed `FUN_100134d0` tail N-section (`None` when the
+    /// tail pointer is out of range for the buffer).
+    pub tail: Option<VtTailScan>,
 }
 
 impl VmHeader {
-    /// Parse a `.m` header with `entries` u32 table slots at `0x40`.
-    pub fn parse(bytes: &[u8], entries: usize) -> Option<Self> {
+    /// Parse the full `.m` header (the 16-entry table + the `0x80` /
+    /// `0x84` fields + the tail N-section). Requires at least `0x88`
+    /// bytes.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
         let header = TridentFileHeader::parse(bytes)?;
-        if bytes.len() < 0x40 + entries * 4 {
+        if bytes.len() < 0x88 {
             return None;
         }
-        let mut table = Vec::with_capacity(entries);
-        for i in 0..entries {
-            table.push(u32::from_le_bytes(
-                bytes[0x40 + i * 4..0x44 + i * 4].try_into().unwrap(),
-            ));
-        }
-        Some(VmHeader { header, table })
+        let table: Vec<u32> = (0..16)
+            .map(|i| {
+                u32::from_le_bytes(bytes[0x40 + i * 4..0x44 + i * 4].try_into().unwrap())
+            })
+            .collect();
+        let u80 = u32::from_le_bytes(bytes[0x80..0x84].try_into().unwrap());
+        let u84 = u32::from_le_bytes(bytes[0x84..0x88].try_into().unwrap());
+        let tail = VtTailScan::parse(bytes, header.tail as usize);
+        Some(VmHeader {
+            header,
+            table,
+            u80,
+            u84,
+            tail,
+        })
+    }
+
+    /// Slot 5 — the u16 predicate table offset (0x206D ukr / 0x1ACF
+    /// rus; the `ctx+0x44` table `FUN_100176c0` walks).
+    pub fn pred_off(&self) -> Option<u32> {
+        self.table.get(5).copied()
+    }
+
+    /// Slot 11 — the u16 word table offset (0x37CB ukr / 0x3001 rus;
+    /// the `ctx+0x30` table). The section layout is `[u16 count]` +
+    /// `count` relative u16 offsets (count 0xFE ukr / 0x100 rus).
+    pub fn word_off(&self) -> Option<u32> {
+        self.table.get(11).copied()
     }
 }
 
@@ -583,13 +658,84 @@ mod tests {
             eprintln!("skipped: no base");
             return;
         };
-        let h = VmHeader::parse(&m, 8).expect("header");
+        let h = VmHeader::parse(&m).expect("header");
         assert_eq!(h.header.name, "lmUR.m");
         assert_eq!(h.header.tail, 0x70E, "tail section start");
         assert_eq!(
             h.table,
-            vec![0x1000, 0x88, 0x0BCB, 0x726, 0xA1, 0x206D, 0x244B, 0x29D7]
+            vec![
+                0x1000, 0x88, 0x0BCB, 0x726, 0xA1, 0x206D, 0x244B, 0x29D7, 0x3000,
+                0x339D, 0x36EF, 0x37CB, 0x39C9, 0xBF3, 0xBFC, 0x1405
+            ],
+            "the full 16-slot u32 table (v0.21.0)"
         );
+        // the pinned slot roles (v0.21.0)
+        assert_eq!(h.pred_off(), Some(0x206D), "slot 5 = u16 predicate table");
+        assert_eq!(h.word_off(), Some(0x37CB), "slot 11 = u16 word table");
+        // the cross-language header invariants
+        assert_eq!(h.u84, 0x206D - 7, "u32@0x84 = pred_off - 7");
+        assert_eq!(h.u80, 0x206D - 19, "u32@0x80 = pred_off - 19");
+        // the .m tail N-section IS non-empty (unlike the .vt tail)
+        let ts = h.tail.as_ref().expect("the .m tail N-section");
+        assert_eq!(ts.count, 3);
+        assert_eq!(ts.records.len(), 3);
+        assert_eq!(ts.records[0].key, *b"R");
+        assert_eq!(ts.records[0].list, vec![0x1]);
+        assert_eq!(ts.records[1].key, *b"N*");
+        assert_eq!(ts.records[1].list, vec![0x1C, 0x3E]);
+        assert_eq!(ts.records[2].key, *b"*");
+        assert_eq!(ts.records[2].list, vec![0x3E, 0x14]);
+    }
+
+    #[test]
+    fn word_table_section_is_the_count_plus_offsets_shape() {
+        // v0.21.0: the u16 word table (slot 11) is a `[u16 count]` +
+        // `count` relative u16 offset array that exactly fills the
+        // section up to the slot-12 pointer.
+        let Some(m) = real(r"C:\Zakon.Local\Baza\SOFT\lmur.m") else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let h = VmHeader::parse(&m).expect("header");
+        let word = h.word_off().expect("word table");
+        let next = h.table[12];
+        let count = u16::from_le_bytes([m[word as usize], m[word as usize + 1]]);
+        assert_eq!(count, 0xFE, "ukr word-table count (254)");
+        let extent = (next as usize - word as usize);
+        assert_eq!(extent, (1 + count as usize) * 2, "the section fills exactly");
+        // the offsets are ascending (a relative record pool)
+        let mut off = word as usize + 2;
+        let mut prev = 0u16;
+        for _ in 0..16 {
+            let o = u16::from_le_bytes([m[off], m[off + 1]]);
+            assert!(o > prev || o < 0x0100, "ascending offsets");
+            prev = o;
+            off += 2;
+        }
+        assert_eq!(
+            u16::from_le_bytes([m[off - 2], m[off - 1]]),
+            0x011E,
+            "first 16 offsets step by 2 from 0x0100 (16th = 0x011E)"
+        );
+    }
+
+    #[test]
+    fn pred_table_is_a_plain_ascending_u16_array() {
+        let Some(m) = real(r"C:\Zakon.Local\Baza\SOFT\lmur.m") else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let h = VmHeader::parse(&m).expect("header");
+        let pred = h.pred_off().expect("predicate table");
+        let first: Vec<u16> = (0..4)
+            .map(|i| {
+                u16::from_le_bytes([
+                    m[pred as usize + i * 2],
+                    m[pred as usize + i * 2 + 1],
+                ])
+            })
+            .collect();
+        assert_eq!(first, vec![0x013E, 0x0154, 0x0164, 0x0170]);
     }
 
     #[test]
@@ -616,7 +762,8 @@ mod tests {
     fn short_buffers_yield_none() {
         assert!(TridentFileHeader::parse(&[0u8; 32]).is_none());
         assert!(VtRecordStream::parse(&[0u8; 64]).is_none());
-        assert!(VmHeader::parse(&[0u8; 64], 1).is_none());
+        assert!(VmHeader::parse(&[0u8; 64]).is_none());
+        assert!(VmHeader::parse(&[0u8; 0x80]).is_none());
     }
 
     #[test]
@@ -742,11 +889,32 @@ mod tests {
             eprintln!("skipped: no base");
             return;
         };
-        let hm = VmHeader::parse(&m, 8).expect("rus .m header");
+        let hm = VmHeader::parse(&m).expect("rus .m header");
         assert_eq!(hm.header.name, "lmRU.m");
         assert_eq!(
             hm.table,
-            vec![0x0C20, 0x88, 0xBD8, 0x56B, 0x99, 0x1ACF, 0x2000, 0x25C1]
+            vec![
+                0x0C20, 0x88, 0xBD8, 0x56B, 0x99, 0x1ACF, 0x2000, 0x25C1, 0x28AD,
+                0x2C0F, 0x2F17, 0x3001, 0x3203, 0xC09, 0xC12, 0xF5D
+            ],
+            "the full 16-slot u32 table (v0.21.0)"
         );
+        // the same pinned slot roles as the Ukrainian file
+        assert_eq!(hm.pred_off(), Some(0x1ACF), "slot 5 = u16 predicate table");
+        assert_eq!(hm.word_off(), Some(0x3001), "slot 11 = u16 word table");
+        // the cross-language header invariant holds for rus too
+        assert_eq!(hm.u84, 0x1ACF - 7, "u32@0x84 = pred_off - 7");
+        assert_eq!(hm.u80, 0x1ACF - 19, "u32@0x80 = pred_off - 19");
+        // the rus tail N-section has 4 records (adds "*N")
+        let ts = hm.tail.as_ref().expect("the rus .m tail N-section");
+        assert_eq!(ts.count, 4);
+        assert_eq!(ts.records[0].key, *b"R");
+        assert_eq!(ts.records[0].list, vec![0x8]);
+        assert_eq!(ts.records[1].key, *b"N*");
+        assert_eq!(ts.records[1].list, vec![0x24, 0x0E, 0x26, 0x1D, 0x3E]);
+        assert_eq!(ts.records[2].key, *b"*N");
+        assert_eq!(ts.records[2].list, vec![0x24, 0x0E, 0x26, 0x1D, 0x3E]);
+        assert_eq!(ts.records[3].key, *b"*");
+        assert_eq!(ts.records[3].list, vec![0x3E, 0x1D]);
     }
 }

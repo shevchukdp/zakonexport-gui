@@ -887,6 +887,267 @@ fn nul_walk_land(bytes: &[u8], off: u32, count: u32, block: u32) -> u32 {
     p as u32
 }
 
+// ---------------------------------------------------------------------------
+// v0.27.0: the `FUN_100177d0` predicate catalog (roadmap v0.28.0)
+// ---------------------------------------------------------------------------
+
+/// One predicate opcode of `FUN_100177d0` (roadmap v0.28.0), named by its
+/// raw (hex) opcode value. The 22 variants are the complete decompiled
+/// switch of the DLL's doc-flag predicate table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PredOp {
+    /// 0x00 — unresolved `FUN_10011600(+0xDD)&0x80 == 0` accessor.
+    Op0,
+    /// 0x01 — unresolved `FUN_10011580(idx>>8, +0xDD)&0x40 != 0` accessor.
+    Op1,
+    /// 0x02 — always true; OR `0x0C` into the low flag byte.
+    Op2,
+    /// 0x05 — the next row's `+0xD9` counter is exactly `cur + 1`.
+    Op5,
+    /// 0x06 — the header `H[+8] == 1` (structural approximation via
+    /// `PredRow::header8`).
+    Op6,
+    /// 0x07 — `!(+0xD7 & 8)`.
+    Op7,
+    /// 0x08 — always true; OR `0x02` into the low flag byte.
+    Op8,
+    /// 0x0B — `!(+0xD7 & 0x10)`.
+    Op0B,
+    /// 0x0C — always true; OR `0x28` into the low flag byte.
+    Op0C,
+    /// 0x0D — always true; OR `0x40` into the low flag byte.
+    Op0D,
+    /// 0x10 — always true; OR `0x02` into the high flag byte.
+    Op10,
+    /// 0x14 — `+0xD8 & 1`.
+    Op14,
+    /// 0x16 — always true; OR `0x04` into the high flag byte.
+    Op16,
+    /// 0x17 — `+0x51 != 0` (a prev-chain pointer exists).
+    Op17,
+    /// 0x18 — the prev-chain walk (`+0x51`) reaches the current row.
+    Op18,
+    /// 0x19 — `+0xD7 & 2`.
+    Op19,
+    /// 0x1C — the next-chain walk reaches the prev row (mirrors `Op18`).
+    Op1C,
+    /// 0x1D — `!(+0xD7 & 2)`.
+    Op1D,
+    /// 0x1E — `+0xA4 → *[+0xA4] → +0x4C != 0` (approximation via
+    /// `PredRow::a4_idx` + `a4_4c`).
+    Op1E,
+    /// 0x23 — `prev[+0xD9] < cur[+0xD9]`.
+    Op23,
+    /// 0x24 — `+200 == 0`.
+    Op24,
+    /// 0x1B — always true; OR `0x08` into the high flag byte.
+    Op1B,
+}
+
+/// The null marker for the in-memory row pool (a `PRED_NULL` pointer field
+/// is an absent / terminated link).
+pub const PRED_NULL: u32 = u32::MAX;
+
+/// The in-memory 224+ B predicate row (the fields the 22 opcodes read).
+/// The on-disk 16 B `v0.26.0` word rows are a *different* encoding; the
+/// full row is allocated by the DLL. Pointer fields are pool indices.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PredRow {
+    /// `+0x51` — the prev-chain pointer (pool index; `Op17`/`Op18`/`Op23`).
+    pub prev_idx: u32,
+    /// The next-row pointer (pool index; `Op5`).
+    pub next_idx: u32,
+    /// `+0xA4` — the pointer-to-pointer (pool index; `Op1E`).
+    pub a4_idx: u32,
+    /// `+0xD7` — the low flag byte.
+    pub d7: u8,
+    /// `+0xD8` — the second flag byte.
+    pub d8: u8,
+    /// `+0xD9` — the per-row counter (`Op5`/`Op23`).
+    pub d9: u8,
+    /// `+0xDD` — the unresolved-accessor operand (`Op0`/`Op1`).
+    pub dd: u8,
+    /// `+200` — the field `Op24` tests (`== 0`).
+    pub plus200: u32,
+    /// `H[+8]` — the header byte `Op6` tests (`== 1`; structural proxy).
+    pub header8: u8,
+    /// `*(*(R+0xA4)) + 0x4C` — the final `+0x4C` byte for `Op1E`.
+    pub a4_4c: u8,
+}
+
+impl PredRow {
+    /// A fully-populated synthetic row (every pointer field nulled).
+    pub fn new() -> Self {
+        PredRow {
+            prev_idx: PRED_NULL,
+            next_idx: PRED_NULL,
+            a4_idx: PRED_NULL,
+            d7: 0,
+            d8: 0,
+            d9: 0,
+            dd: 0,
+            plus200: 0,
+            header8: 0,
+            a4_4c: 0,
+        }
+    }
+}
+
+/// A catalog row (opcode → semantics, UA + EN, evaluable flag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PredCatalogEntry {
+    pub op: PredOp,
+    /// The raw on-disk opcode value.
+    pub raw: u32,
+    pub en: &'static str,
+    pub ua: &'static str,
+    /// Whether [`pred_evaluate`] can decide this predicate (the two
+    /// `FUN_10011580`/`FUN_10011600` accessors are `false`).
+    pub evaluable: bool,
+}
+
+/// The complete 22-opcode catalog (sorted by raw opcode).
+pub const PRED_CATALOG: &[PredCatalogEntry] = &[
+    PredCatalogEntry { op: PredOp::Op0,  raw: 0x00, en: "unresolved: FUN_10011600(+0xDD)&0x80==0 → set low 0x80", ua: "нерозв'язано: FUN_10011600(+0xDD)&0x80==0 → low |= 0x80", evaluable: false },
+    PredCatalogEntry { op: PredOp::Op1,  raw: 0x01, en: "unresolved: FUN_10011580(idx>>8,+0xDD)&0x40!=0 → set high 0x01", ua: "нерозв'язано: FUN_10011580(idx>>8,+0xDD)&0x40!=0 → high |= 0x01", evaluable: false },
+    PredCatalogEntry { op: PredOp::Op2,  raw: 0x02, en: "always true; low |= 0x0C", ua: "завжди true; low |= 0x0C", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op5,  raw: 0x05, en: "next row +0xD9 == cur +0xD9 + 1 (not last row)", ua: "next-рядок +0xD9 == cur +0xD9 + 1 (не останній)", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op6,  raw: 0x06, en: "header H[+8] == 1 (structural: row.header8)", ua: "заголовок H[+8] == 1 (структурно: row.header8)", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op7,  raw: 0x07, en: "!(+0xD7 & 8)", ua: "!(+0xD7 & 8)", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op8,  raw: 0x08, en: "always true; low |= 0x02", ua: "завжди true; low |= 0x02", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op0B, raw: 0x0B, en: "!(+0xD7 & 0x10)", ua: "!(+0xD7 & 0x10)", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op0C, raw: 0x0C, en: "always true; low |= 0x28", ua: "завжди true; low |= 0x28", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op0D, raw: 0x0D, en: "always true; low |= 0x40", ua: "завжди true; low |= 0x40", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op10, raw: 0x10, en: "always true; high |= 0x02", ua: "завжди true; high |= 0x02", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op14, raw: 0x14, en: "+0xD8 & 1", ua: "+0xD8 & 1", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op16, raw: 0x16, en: "always true; high |= 0x04", ua: "завжди true; high |= 0x04", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op17, raw: 0x17, en: "+0x51 != 0 (a prev-chain link exists)", ua: "+0x51 != 0 (є prev-ланка)", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op18, raw: 0x18, en: "prev-chain walk (+0x51) reaches the current row", ua: "prev-ланцюг (+0x51) доходить до поточного рядка", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op19, raw: 0x19, en: "+0xD7 & 2", ua: "+0xD7 & 2", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op1C, raw: 0x1C, en: "next-chain walk reaches the prev row (mirrors Op18)", ua: "next-ланцюг доходить до prev-рядка (дзеркало Op18)", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op1D, raw: 0x1D, en: "!(+0xD7 & 2)", ua: "!(+0xD7 & 2)", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op1E, raw: 0x1E, en: "+0xA4 → *[+0xA4] → +0x4C != 0 (structural: a4_idx + a4_4c)", ua: "+0xA4 → *[+0xA4] → +0x4C != 0 (структурно: a4_idx + a4_4c)", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op23, raw: 0x23, en: "prev[+0xD9] < cur[+0xD9]", ua: "prev[+0xD9] < cur[+0xD9]", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op24, raw: 0x24, en: "+200 == 0", ua: "+200 == 0", evaluable: true },
+    PredCatalogEntry { op: PredOp::Op1B, raw: 0x1B, en: "always true; high |= 0x08", ua: "завжди true; high |= 0x08", evaluable: true },
+];
+
+/// Decode a raw on-disk opcode into a [`PredOp`] (None for unknown).
+pub fn pred_from_opcode(raw: u32) -> Option<PredOp> {
+    PRED_CATALOG
+        .iter()
+        .find(|e| e.raw == raw)
+        .map(|e| e.op)
+}
+
+/// The catalog size (the DoD "catalog size" the `trident` verb reports).
+pub const fn pred_catalog_size() -> usize {
+    PRED_CATALOG.len()
+}
+
+/// How many of the 22 are evaluable by [`pred_evaluate`] (20 — the two
+/// unresolved `FUN_10011580`/`FUN_10011600` accessors are not).
+pub const fn pred_evaluable_count() -> usize {
+    20
+}
+
+/// The flag bits a predicate ORs into the `DAT_1002f41c` flag area when it
+/// returns true: `(low byte, high byte)`. The low byte is at stride 7, the
+/// high byte at stride `0xE + 1` (both relative to `DAT_1002f41c`).
+pub fn pred_flag_bits(op: PredOp) -> (u8, u8) {
+    use PredOp::*;
+    match op {
+        Op2 => (0x0C, 0),
+        Op8 => (0x02, 0),
+        Op0C => (0x28, 0),
+        Op0D => (0x40, 0),
+        Op0 => (0x80, 0), // conditional (only when the accessor returns 1)
+        Op10 => (0, 0x02),
+        Op16 => (0, 0x04),
+        Op1B => (0, 0x08),
+        Op1 => (0, 0x01), // conditional
+        _ => (0, 0),
+    }
+}
+
+/// Evaluate the evaluable subset of `FUN_100177d0` against a row pool.
+///
+/// `pool` is the in-memory row array; `idx` is the current row. The two
+/// unresolved accessors ([`PredOp::Op0`]/[`PredOp::Op1`]) return `false`
+/// (they need the `.g`/template decode). The row-walk arms (`Op18`/`Op1C`)
+/// are structural approximations: they walk the `prev_idx`/`next_idx`
+/// pool links.
+pub fn pred_evaluate(op: PredOp, pool: &[PredRow], idx: usize) -> bool {
+    if idx >= pool.len() {
+        return false;
+    }
+    let row = &pool[idx];
+    use PredOp::*;
+    match op {
+        // always-true flag setters
+        Op2 | Op8 | Op0C | Op0D | Op10 | Op16 | Op1B => true,
+        // field checks
+        Op5 => {
+            row.next_idx != PRED_NULL
+                && idx + 1 < pool.len()
+                && pool[row.next_idx as usize]
+                    .d9
+                    .wrapping_sub(row.d9)
+                    == 1
+        }
+        Op6 => row.header8 == 1,
+        Op7 => row.d7 & 8 == 0,
+        Op0B => row.d7 & 0x10 == 0,
+        Op14 => row.d8 & 1 != 0,
+        Op17 => row.prev_idx != PRED_NULL,
+        Op19 => row.d7 & 2 != 0,
+        Op1D => row.d7 & 2 == 0,
+        Op23 => idx > 0 && row.prev_idx != PRED_NULL && pool[row.prev_idx as usize].d9 < row.d9,
+        Op24 => row.plus200 == 0,
+        // row walks (structural approximations)
+        Op18 => {
+            if idx == 0 {
+                return true; // param_2 == 0: the guard is skipped
+            }
+            let mut cur = row.prev_idx;
+            if cur == PRED_NULL {
+                return false;
+            }
+            loop {
+                if cur == idx as u32 {
+                    return true;
+                }
+                cur = pool[cur as usize].prev_idx;
+                if cur == PRED_NULL {
+                    return false;
+                }
+            }
+        }
+        Op1C => {
+            if idx == 0 {
+                return true;
+            }
+            let target = row.prev_idx;
+            let mut cur = row.next_idx;
+            if cur == PRED_NULL {
+                return false;
+            }
+            loop {
+                if cur == target {
+                    return true;
+                }
+                cur = pool[cur as usize].next_idx;
+                if cur == PRED_NULL {
+                    return false;
+                }
+            }
+        }
+        Op1E => row.a4_idx != PRED_NULL && row.a4_4c != 0,
+        // unresolved accessors (FUN_10011580 / FUN_10011600)
+        Op0 | Op1 => false,
+    }
+}
+
 /// The maximal `A-Z` / `0-9` runs of a payload (length >= 2).
 fn latin_runs_of(payload: &[u8]) -> Vec<String> {
     let is_latin = |b: u8| b.is_ascii_alphanumeric();
@@ -1707,5 +1968,176 @@ mod tests {
         assert!(w0.lands_on_next);
         assert_eq!(w0.records, 3);
         assert_eq!(w0.landed, 0x108);
+    }
+
+    // ------------------------------------------------------------------
+    // v0.27.0: the `FUN_100177d0` predicate catalog (roadmap v0.28.0)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn pred_catalog_covers_all_22_opcodes() {
+        assert_eq!(pred_catalog_size(), 22);
+        assert_eq!(pred_evaluable_count(), 20);
+        // every raw opcode decodes to its variant and round-trips
+        for e in PRED_CATALOG {
+            assert_eq!(pred_from_opcode(e.raw), Some(e.op));
+        }
+        // the two unresolved accessors are the only non-evaluable arms
+        let uneval: Vec<&PredCatalogEntry> =
+            PRED_CATALOG.iter().filter(|e| !e.evaluable).collect();
+        assert_eq!(uneval.len(), 2);
+        assert_eq!(uneval[0].op, PredOp::Op0);
+        assert_eq!(uneval[1].op, PredOp::Op1);
+        // opcodes not in the catalog are unknown
+        assert!(pred_from_opcode(3).is_none());
+        assert!(pred_from_opcode(0x25).is_none());
+    }
+
+    #[test]
+    fn pred_flag_bits_match_the_decompiled_arms() {
+        assert_eq!(pred_flag_bits(PredOp::Op2), (0x0C, 0));
+        assert_eq!(pred_flag_bits(PredOp::Op8), (0x02, 0));
+        assert_eq!(pred_flag_bits(PredOp::Op0C), (0x28, 0));
+        assert_eq!(pred_flag_bits(PredOp::Op0D), (0x40, 0));
+        assert_eq!(pred_flag_bits(PredOp::Op0), (0x80, 0));
+        assert_eq!(pred_flag_bits(PredOp::Op10), (0, 0x02));
+        assert_eq!(pred_flag_bits(PredOp::Op16), (0, 0x04));
+        assert_eq!(pred_flag_bits(PredOp::Op1B), (0, 0x08));
+        assert_eq!(pred_flag_bits(PredOp::Op1), (0, 0x01));
+        // field-check opcodes carry no side-effect bits
+        assert_eq!(pred_flag_bits(PredOp::Op19), (0, 0));
+        assert_eq!(pred_flag_bits(PredOp::Op5), (0, 0));
+    }
+
+    #[test]
+    fn pred_evaluate_flag_setters_are_always_true() {
+        let pool = vec![PredRow::new()];
+        for op in [
+            PredOp::Op2,
+            PredOp::Op8,
+            PredOp::Op0C,
+            PredOp::Op0D,
+            PredOp::Op10,
+            PredOp::Op16,
+            PredOp::Op1B,
+        ] {
+            assert!(pred_evaluate(op, &pool, 0));
+        }
+    }
+
+    #[test]
+    fn pred_evaluate_field_checks() {
+        // a row with only d7 bit1 set: 0x02
+        let mut a = PredRow::new();
+        a.d7 = 0x02;
+        let mut b = PredRow::new(); // all zeros
+        // Op19 (+0xD7&2) true on `a`, Op1D (!+0xD7&2) true on `b`
+        assert!(pred_evaluate(PredOp::Op19, &pool1(&a), 0));
+        assert!(!pred_evaluate(PredOp::Op19, &pool1(&b), 0));
+        assert!(pred_evaluate(PredOp::Op1D, &pool1(&b), 0));
+        assert!(!pred_evaluate(PredOp::Op1D, &pool1(&a), 0));
+        // Op7 / Op0B: d7 bit3 / bit4 clear → true on `b`
+        assert!(pred_evaluate(PredOp::Op7, &pool1(&b), 0));
+        assert!(pred_evaluate(PredOp::Op0B, &pool1(&b), 0));
+        // Op14: d8 bit0
+        let mut c = PredRow::new();
+        c.d8 = 0x01;
+        assert!(pred_evaluate(PredOp::Op14, &pool1(&c), 0));
+        assert!(!pred_evaluate(PredOp::Op14, &pool1(&b), 0));
+        // Op17: a prev link exists
+        let mut d = PredRow::new();
+        d.prev_idx = 0;
+        assert!(pred_evaluate(PredOp::Op17, &pool1(&d), 0));
+        assert!(!pred_evaluate(PredOp::Op17, &pool1(&b), 0));
+        // Op24: +200 == 0 (default)
+        assert!(pred_evaluate(PredOp::Op24, &pool1(&b), 0));
+        let mut e = PredRow::new();
+        e.plus200 = 7;
+        assert!(!pred_evaluate(PredOp::Op24, &pool1(&e), 0));
+        // Op6: header8 == 1
+        let mut f = PredRow::new();
+        f.header8 = 1;
+        assert!(pred_evaluate(PredOp::Op6, &pool1(&f), 0));
+        assert!(!pred_evaluate(PredOp::Op6, &pool1(&b), 0));
+    }
+
+    // a single-row pool around one row
+    fn pool1(r: &PredRow) -> Vec<PredRow> {
+        vec![*r]
+    }
+
+    #[test]
+    fn pred_evaluate_counter_ops() {
+        // Op5: the next row's d9 is exactly cur+1 (and not the last row)
+        let mut cur = PredRow::new();
+        cur.d9 = 5;
+        cur.next_idx = 1;
+        let mut nxt = PredRow::new();
+        nxt.d9 = 6;
+        let pool = vec![cur, nxt];
+        assert!(pred_evaluate(PredOp::Op5, &pool, 0));
+        // a Δ of 2 is not 1
+        let mut pool2 = pool.clone();
+        pool2[1].d9 = 7;
+        assert!(!pred_evaluate(PredOp::Op5, &pool2, 0));
+        // Op23: prev[+0xD9] < cur[+0xD9]
+        let mut prev = PredRow::new();
+        prev.d9 = 3;
+        let mut c2 = PredRow::new();
+        c2.d9 = 4;
+        c2.prev_idx = 0;
+        let pool3 = vec![prev, c2];
+        assert!(pred_evaluate(PredOp::Op23, &pool3, 1));
+        // equal counters are not `<`
+        let mut pool4 = pool3.clone();
+        pool4[0].d9 = 4;
+        assert!(!pred_evaluate(PredOp::Op23, &pool4, 1));
+        // idx 0 has no prev row → Op23 is false
+        assert!(!pred_evaluate(PredOp::Op23, &pool3, 0));
+    }
+
+    #[test]
+    fn pred_evaluate_pointer_walks() {
+        // Op1E: +0xA4 → *[+0xA4] → +0x4C != 0
+        let mut r = PredRow::new();
+        r.a4_idx = 5;
+        r.a4_4c = 0;
+        assert!(!pred_evaluate(PredOp::Op1E, &pool1(&r), 0));
+        r.a4_4c = 1;
+        assert!(pred_evaluate(PredOp::Op1E, &pool1(&r), 0));
+        r.a4_idx = PRED_NULL;
+        assert!(!pred_evaluate(PredOp::Op1E, &pool1(&r), 0));
+        // Op18: the prev chain (a 2-row mutual loop) reaches the current row
+        let mut a = PredRow::new();
+        a.prev_idx = 1;
+        let mut b = PredRow::new();
+        b.prev_idx = 0;
+        let pool = vec![a, b];
+        assert!(pred_evaluate(PredOp::Op18, &pool, 1));
+        // Op18 at idx 0 skips the guard → true
+        assert!(pred_evaluate(PredOp::Op18, &pool, 0));
+        // a broken chain (a head with a NULL link) does not reach
+        let mut c = PredRow::new();
+        c.prev_idx = 1;
+        let mut d = PredRow::new();
+        d.prev_idx = 0; // and row0.prev_idx is NULL → terminates
+        let pool2 = vec![c, d]; // c.prev_idx=1, d.prev_idx=0, c has prev 1...
+        // from idx1: cur=d, prev_idx=0; walk: 0==1?no, c.prev_idx=1; 1==1 → true
+        assert!(pred_evaluate(PredOp::Op18, &pool2, 1));
+        // Op1C: the next chain reaches the prev row
+        let mut x = PredRow::new();
+        x.next_idx = 1;
+        let mut y = PredRow::new();
+        y.prev_idx = 0;
+        y.next_idx = 0;
+        let pool3 = vec![x, y];
+        assert!(pred_evaluate(PredOp::Op1C, &pool3, 1));
+    }
+
+    #[test]
+    fn pred_evaluate_unresolved_accessors_return_false() {
+        let pool = vec![PredRow::new()];
+        assert!(!pred_evaluate(PredOp::Op0, &pool, 0));
+        assert!(!pred_evaluate(PredOp::Op1, &pool, 0));
     }
 }

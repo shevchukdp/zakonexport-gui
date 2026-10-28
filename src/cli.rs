@@ -34,6 +34,7 @@ Usage:
           (SOFT\\ inventory — 16 files incl. windows.kod + lm.a, plus the
           decoded parts: kod codes, fold pairs, dict records, vt stream; .m section
           walker (v0.26.0: 16-slot classification + word-rows + 0x88 registry);
+          predicate catalog (v0.27.0: FUN_100177d0 22 opcodes + evaluable subset);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -1135,6 +1136,15 @@ pub fn main_cli() {
                 // per-word rows + the 0x88 registry (both languages)
                 println!("{}", m_sections_line("ukr", "lmur.m", &idx.m_sections));
                 println!("{}", m_sections_line("rus", "lmru.m", &idx.rus_m_sections));
+                // v0.27.0: the FUN_100177d0 predicate catalog (roadmap
+                // v0.28.0) — the static 22-opcode reference + the
+                // evaluable-subset size (the trident verb's catalog size)
+                println!(
+                    "predicate-каталог (v0.27.0, FUN_100177d0): {} opcodes · evaluable \
+                     {} · unresolved-accessors 2 (0/1 → FUN_10011580/11600)",
+                    crate::trident_vt::pred_catalog_size(),
+                    crate::trident_vt::pred_evaluable_count()
+                );
                 // the exact .voc morphology tables (v0.17.0)
                 if let Some(m) = &idx.morphology {
                     let t = &m.table;
@@ -1469,6 +1479,8 @@ pub fn main_cli() {
                  Lang {{Ukr,Rus}}) + tsearch --lang u|r|auto + trident мовні індекси). \\
                  v0.26.0: m-секційний walker (VmSections — класифікація 16 слотів \\\
                  .m-таблиці + 16B word-rows slot-0 + 0x88 registry + tiling-assert). \\\
+                 v0.27.0: FUN_100177d0 predicate-каталог (22 opcodes, UA+EN) + \\\
+                 evaluable-subset pred_evaluate (20/22; trident reports catalog size). \\\
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

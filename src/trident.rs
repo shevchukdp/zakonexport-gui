@@ -1189,6 +1189,20 @@ impl TridentIndex {
         }
         (hits, total)
     }
+
+    /// The LmCode hex of a query term (v0.36.0, for the GUI Trident search
+    /// panel): the LmCode byte representation of the term via the Ukrainian
+    /// fold table, plus the `encodable/total` char coverage. Empty hex when
+    /// the term has no encodable characters. EN: the `query -> LmCode` step
+    /// of the tsearch chain, as a display string.
+    pub fn lmcode_hex(&self, term: &str) -> String {
+        let (bytes, enc, total) = encode_term(term, &self.fold.ukr);
+        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        if hex.is_empty() {
+            return format!("(не кодується: {enc}/{total})");
+        }
+        format!("{} ({enc}/{total})", hex.join(" "))
+    }
 }
 
 /// Extract the dictionary records from a `.voc` file.
@@ -1282,6 +1296,33 @@ pub fn read_vt_u16(vt: &[u8]) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lmcode_hex_of_known_terms() {
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let idx = TridentIndex::open(baza).expect("index");
+        // the v0.19.0 anchor stems (BUV/PERE/SPV come from these) are fully
+        // LmCode-encodable, so their hex is non-empty (a space-separated byte
+        // run + the enc/total coverage note).
+        for t in ["не", "був", "пере"] {
+            let h = idx.lmcode_hex(t);
+            assert!(
+                !h.starts_with("(не кодується"),
+                "{t} must be LmCode-encodable, got {h}"
+            );
+            assert!(h.ends_with(")"), "the coverage note is shown, got {h}");
+        }
+        // a non-encodable symbol yields only the coverage note
+        let h = idx.lmcode_hex("…");
+        assert!(
+            h.starts_with("(не кодується"),
+            "«…» is not LmCode-encodable, got {h}"
+        );
+    }
 
     #[test]
     fn legacy_engine_parity_ne_vs_pe32_dlls() {

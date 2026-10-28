@@ -6,6 +6,14 @@
 //! Step 3: multi-select of results (✓ column; click on the first cell or
 //!         double-click a row) and export of the selected subset or of all
 //!         filtered results as MD / RTF / DOCX.
+//! Step 4 (v0.36.0): a "Тріант (tsearch)" panel (a separate modal window,
+//!         like the preview/annex windows) surfaces the native-FTS tsearch
+//!         chain: query -> LmCode hex -> Latin candidate -> `.vt` record
+//!         offset -> the record's native u16 doc ids. It reuses the crate
+//!         API (`crate::trident::TridentIndex` + `lmcode_hex`) — no engine
+//!         duplication in the GUI. EN: a native GUI panel for the Trident
+//!         search chain; it is a separate window, so it never adds rows to
+//!         the results list (the guitest `rows=430` baseline holds).
 //!
 //! Search/fields/filtering and export run in worker threads; the UI thread
 //! only polls a channel from a timer, so the window never blocks. Stale
@@ -677,6 +685,44 @@ pub struct App {
     #[nwg_control(parent: update_window, size: (118, 28), position: (566, 288), text: "Закрити")]
     #[nwg_events(OnButtonClick: [App::on_update_click_close])]
     btn_update_close: nwg::Button,
+
+    // ---- row 3: the Trident search-panel trigger (v0.36.0) ----------------
+    #[nwg_control(parent: window, size: (104, 26), position: (1036, 84), text: "Тріант…")]
+    #[nwg_events(OnButtonClick: [App::on_trident_open])]
+    btn_trident: nwg::Button,
+
+    // ---- Trident search panel (v0.36.0, roadmap v0.37.0) ------------------
+    // a separate modal window (like preview/annex/update) so its result
+    // list never touches `row_hits` -> the guitest rows=430 baseline holds.
+    #[nwg_control(size: (700, 388), position: (140, 80),
+        title: "Тріант (tsearch)",
+        flags: "WINDOW|MINIMIZE_BOX|SYS_MENU")]
+    #[nwg_events(OnWindowClose: [App::on_trident_close(SELF, EVT_DATA)])]
+    trident_window: nwg::Window,
+
+    #[nwg_control(parent: trident_window, size: (50, 24), position: (10, 12), text: "Запит:")]
+    trident_q_label: nwg::Label,
+
+    #[nwg_control(parent: trident_window, size: (430, 24), position: (62, 10))]
+    trident_q_edit: nwg::TextInput,
+
+    #[nwg_control(parent: trident_window, size: (120, 28), position: (500, 8), text: "Шукати")]
+    #[nwg_events(OnButtonClick: [App::on_trident_run])]
+    trident_run_btn: nwg::Button,
+
+    #[nwg_control(parent: trident_window, size: (44, 24), position: (10, 44), text: "База:")]
+    trident_base_label: nwg::Label,
+
+    #[nwg_control(parent: trident_window, size: (382, 24), position: (54, 42))]
+    trident_base_edit: nwg::TextInput,
+
+    #[nwg_control(parent: trident_window, size: (664, 296), position: (10, 76),
+        flags: "VISIBLE|HSCROLL|VSCROLL|AUTOVSCROLL|AUTOHSCROLL|TAB_STOP")]
+    trident_result: nwg::TextBox,
+
+    #[nwg_control(parent: trident_window, size: (118, 28), position: (572, 346), text: "Закрити")]
+    #[nwg_events(OnButtonClick: [App::on_trident_click_close])]
+    trident_close_btn: nwg::Button,
 
     // plain state (no attributes — derive leaves them untouched)
     baza: PathBuf,
@@ -1537,6 +1583,77 @@ impl App {
         self.update_window.set_visible(false);
     }
 
+    // ---- Trident search panel (v0.36.0, roadmap v0.37.0) ------------------
+    /// Open the Trident search panel, seeding it with the main query + the
+    /// current base, and run the first tsearch chain.
+    pub fn on_trident_open(&self) {
+        self.trident_q_edit.set_text(&self.query_edit.text());
+        let (_label, dir) = self.bases_current();
+        self.trident_base_edit.set_text(dir.to_string_lossy().as_ref());
+        self.trident_result
+            .set_text_unix2dos(&self.trident_chain(&self.query_edit.text(), &dir));
+        self.trident_window.set_visible(true);
+    }
+
+    /// Run the tsearch chain on the panel's query + base.
+    pub fn on_trident_run(&self) {
+        let base = PathBuf::from(self.trident_base_edit.text());
+        let q = self.trident_q_edit.text();
+        self.trident_result
+            .set_text_unix2dos(&self.trident_chain(&q, &base));
+    }
+
+    /// The tsearch chain as a display string (v0.36.0):
+    /// query -> LmCode hex -> Latin candidate -> `.vt` record @off -> the
+    /// record's native u16 doc ids. Reuses the crate API
+    /// ([`crate::trident::TridentIndex`]) — no engine duplication in the GUI.
+    fn trident_chain(&self, query: &str, base: &Path) -> String {
+        let Some(idx) = crate::trident::TridentIndex::open(base) else {
+            return format!(
+                "Немає Trident-індексів у {base:?} (SOFT\\lmu.voc + lmur.vt) — \
+                 пошук не доступний."
+            );
+        };
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        if terms.is_empty() {
+            return String::from("Введіть запит (терміни через пробіл).");
+        }
+        let mut out = String::new();
+        for term in &terms {
+            out.push_str(&format!("запит: {term}\n"));
+            out.push_str(&format!("  LmCode: {}\n", idx.lmcode_hex(term)));
+            let hits = idx.exact_postings(term);
+            if hits.is_empty() {
+                out.push_str("  точний збіг у .vt відсутній (жоден кандидат не знайдено)\n");
+                continue;
+            }
+            for (cand, off, u16s) in &hits {
+                let docs: Vec<String> = u16s
+                    .iter()
+                    .take(8)
+                    .map(|u| u.to_string())
+                    .collect();
+                let more = if u16s.len() > 8 { "…" } else { "" };
+                out.push_str(&format!(
+                    "  кандидат {cand} @ .vt 0x{off:x} · docnums: [{docs}]{more}\n",
+                    docs = docs.join(", ")
+                ));
+            }
+        }
+        out
+    }
+
+    pub fn on_trident_click_close(&self) {
+        self.trident_window.set_visible(false);
+    }
+
+    pub fn on_trident_close(&self, evt: &nwg::EventData) {
+        if let nwg::EventData::OnWindowClose(wcd) = evt {
+            wcd.close(false);
+        }
+        self.trident_window.set_visible(false);
+    }
+
     fn show_preview(&self, docnum: u32, fl: &Option<fields::DocFields>, text: &str) {
         // cache for in-place re-render on a preview-mode switch
         *self.preview_cache.borrow_mut() = Some((docnum, fl.clone(), text.to_string()));
@@ -2003,10 +2120,23 @@ impl App {
                                         }
                                     }
                                 }
+                                // v0.36.0: exercise the Trident search panel on
+                                // the real base (the DoD "the panel renders +
+                                // runs on the real base"); report its status.
+                                let (_lbl, base_dir) = self.bases_current();
+                                let trident_status = {
+                                    let chain = self.trident_chain("роз'яснення", &base_dir);
+                                    if chain.starts_with("Немає Trident-індексів") {
+                                        "noindex".to_string()
+                                    } else {
+                                        let hits = chain.matches("кандидат ").count();
+                                        format!("ok({hits})")
+                                    }
+                                };
                                 let _ = std::fs::write(
                                     GUI_READY,
                                     format!(
-                                        "GUI OK rows={rows} selected={sel} exported={exported} files={files} marks={marks} total={total} out={out} preview_chars={chars} ptitle={title}\n"
+                                        "GUI OK rows={rows} selected={sel} exported={exported} files={files} marks={marks} total={total} out={out} preview_chars={chars} ptitle={title} trident={trident_status}\n"
                                     ),
                                 );
                                 *self.gt_stage.borrow_mut() = 5;

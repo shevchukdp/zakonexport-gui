@@ -920,6 +920,245 @@ impl VocBTree {
 }
 
 // ---------------------------------------------------------------------------
+// v0.31.0 (roadmap v0.32.0): the 4096-resync dense-node payload semantics
+// ---------------------------------------------------------------------------
+
+/// One decoded dense B-tree node — a 4096 resync slot (roadmap v0.32.0).
+///
+/// The v0.18.x walker resynchronizes the packed listA/listB regions onto the
+/// 4096-aligned node slots (`0x69000..0x77000` in `lmu.voc`, step `0x1000`).
+/// Each slot is a B-tree node (the `FUN_10002b70` header):
+/// - byte 0: `0x80` = a u16 child list is present; `0x40` = the `FUN_100028e0`
+///   leaf key-walk path (the low bits carry the leaf's key-run metadata).
+/// - byte 1: `0x80` = the child / key count is present; low 7 bits = the
+///   child / key count.
+///
+/// A child-list node's payload is `count` u16 child ids (pool-resolve or the
+/// virtual `+0x48` offset); a leaf / key node's payload is the packed LmCode
+/// key runs (case-folded bytes `<= 0x3F`, terminated by `0x00FF`-style
+/// markers — the same byte-VM key encoding the `.vt` stream uses).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenseNode {
+    /// the slot's file offset (a 4096-aligned resync landing).
+    pub off: u32,
+    /// byte 0 (the child-list / `0x40`-leaf flags).
+    pub hdr: u8,
+    /// byte 1 (the count-present flag + the low-7 count).
+    pub count_byte: u8,
+    /// byte 0 & `0x80` — a u16 child list is present.
+    pub has_child: bool,
+    /// byte 0 & `0x40` — the `FUN_100028e0` leaf key-walk path.
+    pub is_leaf40: bool,
+    /// byte 1 & `0x80` — the child / key count is present.
+    pub count_present: bool,
+    /// byte 1 & `0x7f` — the child / key count.
+    pub count: u8,
+    /// the node's raw payload (the 2-byte header + the child list or key run).
+    pub raw: Vec<u8>,
+}
+
+impl DenseNode {
+    /// The node's raw extent: the 2-byte header + `count * 2` bytes for a
+    /// child list, or the packed key run (bounded, `2 + count`) for a leaf.
+    pub fn extent(&self) -> usize {
+        if self.has_child {
+            2 + (self.count as usize) * 2
+        } else {
+            2 + self.count as usize
+        }
+    }
+}
+
+/// The 722/2157 reconciliation facts (the roadmap v0.32.0 DoD stretch).
+///
+/// The section headers declare `listA` (722) and `listB` (2157) packed
+/// records, but the pointer-array resync walk (block = [`WALK_BLOCK`] = 4096)
+/// walks only `list_a_walked` / `list_b_walked` starts before it runs off the
+/// file end — the remainder (the "dense" shortfall) are the node keys packed
+/// inside the 4096-block data, consumed directly rather than via the pointer
+/// array. The delta `listB − listA` is the roadmap-referenced `722/2157`
+/// reconciliation (UA+EN below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DenseReconcile {
+    /// the listA section-header record count (722 in `lmu.voc`).
+    pub list_a: u16,
+    /// the listB section-header record count (2157 in `lmu.voc`).
+    pub list_b: u16,
+    /// the listA pointer-array walkable starts (388 in `lmu.voc`).
+    pub list_a_walked: usize,
+    /// the listB pointer-array walkable starts (382 in `lmu.voc`).
+    pub list_b_walked: usize,
+}
+
+impl DenseReconcile {
+    /// The listB − listA delta (1435 in `lmu.voc`).
+    pub fn delta(&self) -> i32 {
+        self.list_b as i32 - self.list_a as i32
+    }
+
+    /// The listA dense shortfall (`listA − walked`): the node keys packed in
+    /// the 4096-block data, not the pointer array (334 in `lmu.voc`).
+    pub fn list_a_dense(&self) -> usize {
+        self.list_a as usize - self.list_a_walked
+    }
+
+    /// The listB dense shortfall (`listB − walked`) (1775 in `lmu.voc`).
+    pub fn list_b_dense(&self) -> usize {
+        self.list_b as usize - self.list_b_walked
+    }
+}
+
+/// The 4096-resync dense-node region (roadmap v0.32.0): the per-slot decodes
+/// (`slots`) + the listA/listB reconciliation counts. `slots` is the
+/// data-driven set of 4096-aligned node slots the listA resync walk lands on
+/// (`lmu.voc`: the 15 slots `0x69000..0x77000`).
+///
+/// **The in-memory word-struct layout** (the `FUN_10004370` oracle, documented
+/// clean-room / file-referenced): the engine's per-section word array is a
+/// NULL-terminated array of **word-struct pointers** (`param_3`), one per
+/// record. Each struct's byte length is mode-specific (`param_4` = the mode
+/// tag): `'n'` = `strlen` (a NUL-terminated LmCode run), `'e'` =
+/// `FUN_100041d0`, `'f'` = `FUN_100044a0`, `-1` = `FUN_10004210`. The
+/// validator advances each pointer by its length and asserts the byte right
+/// past it is NUL (`*(ptr + len) == 0`); a non-NUL byte is a free/overrun
+/// (`FUN_10021940`). The dense nodes decode the *on-disk* packed form of
+/// exactly these per-word structs (the pointer array is the in-memory
+/// consumer, the 4096-block data is the on-disk source).
+#[derive(Debug, Clone, Default)]
+pub struct VocDenseNodes {
+    /// the per-slot node decodes (the 4096-aligned resync landings).
+    pub slots: Vec<DenseNode>,
+    /// the listA section-header record count (722 in `lmu.voc`).
+    pub list_a_count: u16,
+    /// the listB section-header record count (2157 in `lmu.voc`).
+    pub list_b_count: u16,
+    /// the listA pointer-array walkable starts (388 in `lmu.voc`).
+    pub list_a_walked: usize,
+    /// the listB pointer-array walkable starts (382 in `lmu.voc`).
+    pub list_b_walked: usize,
+}
+
+impl VocDenseNodes {
+    /// Decode the dense-node region from a `.voc` file: the 4096-aligned
+    /// resync slots the listA/listB walks land on + the section-header record
+    /// counts + the pointer-array walkable starts. `None` when the section
+    /// table does not parse. The slot range is data-driven: the 4096-aligned
+    /// offsets from `ceil(listA / 4096) * 4096` up to the earlier of the
+    /// two walks' landings (or the file end).
+    pub fn parse(voc: &[u8]) -> Option<Self> {
+        let table = VocSectionTable::parse(voc)?;
+        let list_a_count = u16_from(voc, table.list_a);
+        let list_b_count = u16_from(voc, table.list_b);
+        let la = walk_section_records(voc, table.list_a, REC_MODE_N, WALK_BLOCK);
+        let lb = walk_section_records(voc, table.list_b, REC_MODE_N, WALK_BLOCK);
+        // the 4096-aligned slot range: from the first block boundary at/after
+        // listA up to the earlier walk landing (or the file end)
+        let block = WALK_BLOCK as usize;
+        let first = (table.list_a as usize / block).saturating_add(1) * block;
+        let end = la.landed.min(lb.landed).min(voc.len() as u32) as usize;
+        let mut slots = Vec::new();
+        let mut off = first as u32;
+        while (off as usize) < end {
+            let o = off as usize;
+            if o + 2 <= voc.len() {
+                let b0 = voc[o];
+                let b1 = voc[o + 1];
+                let has_child = b0 & 0x80 != 0;
+                let count = (b1 & 0x7f) as u8;
+                let extent = if has_child {
+                    2 + (count as usize) * 2
+                } else {
+                    2 + count as usize
+                };
+                let e = (o + extent).min(voc.len());
+                let raw = voc.get(o..e).map(|s| s.to_vec()).unwrap_or_default();
+                slots.push(DenseNode {
+                    off,
+                    hdr: b0,
+                    count_byte: b1,
+                    has_child,
+                    is_leaf40: b0 & 0x40 != 0,
+                    count_present: b1 & 0x80 != 0,
+                    count,
+                    raw,
+                });
+            }
+            off = off.saturating_add(WALK_BLOCK);
+        }
+        Some(VocDenseNodes {
+            slots,
+            list_a_count,
+            list_b_count,
+            list_a_walked: la.starts.len(),
+            list_b_walked: lb.starts.len(),
+        })
+    }
+
+    /// The listA/listB reconciliation facts (the `722/2157` delta + the dense
+    /// shortfalls).
+    pub fn reconcile(&self) -> DenseReconcile {
+        DenseReconcile {
+            list_a: self.list_a_count,
+            list_b: self.list_b_count,
+            list_a_walked: self.list_a_walked,
+            list_b_walked: self.list_b_walked,
+        }
+    }
+
+    /// Structural validation (the roadmap v0.32.0 DoD, part-1): every slot's
+    /// extent stays in file bounds, a child-list node fits one 4096 block, and
+    /// the dense shortfalls are non-negative (the header count >= the walked
+    /// count). Returns `(ok, mismatches)` — the number of structurally-valid
+    /// slots and a human-readable issue list (empty when clean). The full
+    /// LmCode key cross-check (every node key is a valid word vs the
+    /// dictionary + `.vt`) needs the `DAT_1002e642` case-fold table — the
+    /// same DLL-image global blocker as the `VmRecord` rate — and is the
+    /// deferred stretch, not this structural pass.
+    pub fn validate(&self, voc: &[u8]) -> (usize, Vec<String>) {
+        let mut ok = 0usize;
+        let mut issues = Vec::new();
+        for node in &self.slots {
+            let ext = node.extent();
+            if node.off as usize + ext > voc.len() {
+                issues.push(format!(
+                    "{:#x}: extent {} overruns the file (len {})",
+                    node.off,
+                    ext,
+                    voc.len()
+                ));
+            } else if node.has_child && (node.count as usize) * 2 > WALK_BLOCK as usize {
+                issues.push(format!(
+                    "{:#x}: child list (count {}) exceeds one 4096 block",
+                    node.off, node.count
+                ));
+            } else {
+                ok += 1;
+            }
+        }
+        let rec = self.reconcile();
+        if self.list_a_walked > self.list_a_count as usize {
+            issues.push(format!(
+                "listA: walked {} > header count {}",
+                self.list_a_walked, self.list_a_count
+            ));
+        }
+        if self.list_b_walked > self.list_b_count as usize {
+            issues.push(format!(
+                "listB: walked {} > header count {}",
+                self.list_b_walked, self.list_b_count
+            ));
+        }
+        if rec.delta() <= 0 {
+            issues.push(format!(
+                "delta listB-listA = {} (expected positive; the packed listB is larger)",
+                rec.delta()
+            ));
+        }
+        (ok, issues)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
 
@@ -1273,5 +1512,102 @@ mod tests {
         assert_eq!(leaf.node_off, 64, "the descent reached the pool leaf");
         assert_eq!(leaf.vt_off, 64, "the leaf's .vt landing is its pool offset");
         assert_eq!(leaf.key.len(), 2, "the leaf's raw bytes (the 2-byte header)");
+    }
+
+    // ------------------------------------------------------------------
+    // v0.31.0 (roadmap v0.32.0): the 4096-resync dense-node payload semantics
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn voc_dense_nodes_parse_the_real_lmu_slots() {
+        let Some(voc) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.voc").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let dn = VocDenseNodes::parse(&voc).expect("the dense-node region");
+        // the 15 confirmed 4096-aligned resync slots (0x69000..0x77000)
+        assert_eq!(dn.slots.len(), 15, "the 15 resync slots");
+        assert_eq!(dn.slots[0].off, 0x69000, "the first slot");
+        assert_eq!(dn.slots.last().unwrap().off, 0x77000, "the last slot");
+        // the section-header record counts (the 722/2157 pair)
+        assert_eq!(dn.list_a_count, 722, "listA header count");
+        assert_eq!(dn.list_b_count, 2157, "listB header count");
+        // the pointer-array walkable starts (the resync walk, block 4096)
+        assert_eq!(dn.list_a_walked, 388, "listA walked starts");
+        assert_eq!(dn.list_b_walked, 382, "listB walked starts");
+        // exactly one child-list node (0x77000); the rest are leaf/key nodes
+        assert_eq!(
+            dn.slots.iter().filter(|n| n.has_child).count(),
+            1,
+            "only 0x77000 carries a child list"
+        );
+        let rec = dn.reconcile();
+        assert_eq!(rec.delta(), 1435, "listB - listA delta (2157 - 722)");
+        assert_eq!(rec.list_a_dense(), 334, "listA dense shortfall (722 - 388)");
+        assert_eq!(rec.list_b_dense(), 1775, "listB dense shortfall (2157 - 382)");
+        println!(
+            "lmu.voc dense nodes: {} slots · 722/2157 delta {} · dense shortfalls {}/{} (recorded)",
+            dn.slots.len(),
+            rec.delta(),
+            rec.list_a_dense(),
+            rec.list_b_dense()
+        );
+    }
+
+    #[test]
+    fn voc_dense_nodes_validate_is_clean_on_the_real_lmu() {
+        let Some(voc) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.voc").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let dn = VocDenseNodes::parse(&voc).expect("the dense-node region");
+        let (ok, issues) = dn.validate(&voc);
+        assert_eq!(ok, 15, "every slot's extent stays in bounds and fits a block");
+        assert!(
+            issues.is_empty(),
+            "the structural validation is clean (got {issues:?})"
+        );
+    }
+
+    #[test]
+    fn dense_node_extent_is_child_times_two() {
+        // a child-list node: extent = 2 + count*2 (the u16 child list)
+        let child = DenseNode {
+            off: 0x77000,
+            hdr: 0xAE,
+            count_byte: 0xF9,
+            has_child: true,
+            is_leaf40: false,
+            count_present: true,
+            count: 121,
+            raw: vec![0u8; 244],
+        };
+        assert_eq!(child.extent(), 2 + 121 * 2, "the child-list extent");
+        // a leaf / key node: extent = 2 + count (the packed key run, bounded)
+        let leaf = DenseNode {
+            off: 0x72000,
+            hdr: 0x5E,
+            count_byte: 0x7F,
+            has_child: false,
+            is_leaf40: true,
+            count_present: false,
+            count: 127,
+            raw: vec![0u8; 129],
+        };
+        assert_eq!(leaf.extent(), 2 + 127, "the leaf key-run extent");
+    }
+
+    #[test]
+    fn dense_reconcile_delta_and_dense_shortfalls() {
+        // the recorded lmu.voc reconciliation (the 722/2157 delta + shortfalls)
+        let rec = DenseReconcile {
+            list_a: 722,
+            list_b: 2157,
+            list_a_walked: 388,
+            list_b_walked: 382,
+        };
+        assert_eq!(rec.delta(), 1435, "listB - listA (2157 - 722)");
+        assert_eq!(rec.list_a_dense(), 334, "listA header - walked (722 - 388)");
+        assert_eq!(rec.list_b_dense(), 1775, "listB header - walked (2157 - 382)");
     }
 }

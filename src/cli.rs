@@ -37,6 +37,7 @@ Usage:
           predicate catalog (v0.27.0: FUN_100177d0 22 opcodes + evaluable subset);
           byte-VM part-1+2 (v0.29.0: FUN_100019f0 run_record, node pool + affix ops, 0x49 soft-continue);
           .voc root B-tree (v0.30.0: FUN_10002b70 root-node decode + pool-descent skeleton);
+          .voc dense nodes (v0.31.0: 4096-resync 15 slots + 722/2157 listA/listB reconciliation);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -1250,6 +1251,27 @@ pub fn main_cli() {
                         }
                     }
                 }
+                // v0.31.0: the 4096-resync dense-node payload semantics
+                // (roadmap v0.32.0) — the 15 resync slots + the 722/2157
+                // listA/listB reconciliation
+                if !idx.lmu_voc.is_empty() {
+                    if let Some(dn) = crate::trident_voc::VocDenseNodes::parse(&idx.lmu_voc) {
+                        let rec = dn.reconcile();
+                        let (ok, _) = dn.validate(&idx.lmu_voc);
+                        println!(
+                            "voc-dense (v0.31.0, 4096-resync): {} slots (0x{:x}..0x{:x}) · \
+                             722/2157 delta {} · dense shortfalls {}/{} · validate {}/{} ok",
+                            dn.slots.len(),
+                            dn.slots.first().map(|n| n.off).unwrap_or(0),
+                            dn.slots.last().map(|n| n.off).unwrap_or(0),
+                            rec.delta(),
+                            rec.list_a_dense(),
+                            rec.list_b_dense(),
+                            ok,
+                            dn.slots.len()
+                        );
+                    }
+                }
                 // the exact `.vt` record stream + `.m` metadata header (v0.19.0)
                 if let Some(s) = &idx.vt_stream {
                     let runs: usize = s
@@ -1521,6 +1543,8 @@ pub fn main_cli() {
                   affix 0x46/47 + 0x49 soft-continue; 14160-record run, counter>=1 rate 0.738 recorded).\\\
                   v0.30.0: .voc root B-tree (VocBTree::find — root-node decode + pool-descent \\\
                   skeleton; «конституція» full resolution awaits the node-pool pin + FUN_100028e0).\\\
+                  v0.31.0: .voc dense nodes (VocDenseNodes — 4096-resync 15 slot-decodes + \\\
+                  722/2157 listA/listB reconciliation, delta 1435, dense shortfalls 334/1775).\\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

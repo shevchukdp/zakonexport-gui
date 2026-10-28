@@ -16,7 +16,7 @@ Rule for every new version (UA + EN):
 
 ---
 
-## v0.36.0 — 2026-10-28
+## v0.36.0 — 2026-10-29
 
 ### UK
 - **GUI: Trident search panel (roadmap v0.37.0).** `gui.rs` — окреме

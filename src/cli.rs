@@ -34,12 +34,14 @@ Usage:
           (SOFT\\ inventory — 16 files incl. windows.kod + lm.a, plus the
           decoded parts: kod codes, fold pairs, dict records, vt stream;
           search via tsearch — experimental)
-  zakonexport-cli tsearch <query> [--oracle]  search the base's native
-          Trident index (SOFT\\lmu.voc + lmur.vt) — the legacy main app's
-          engine. Document numbers are native 2005-era Trident u16 ids;
-          the doc-number join to the current base is probed (v0.23.0) and
-          the --oracle flag cross-checks the exact join against the
-          ftsearch oracle (per-term count agreement, v0.24.0)
+  zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
+          search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
+          or the Russian lmr.voc + lmru.vt) — the legacy main app's engine.
+          Document numbers are native 2005-era Trident u16 ids; the
+          doc-number join is probed (v0.23.0). --oracle cross-checks the
+          exact join against the ftsearch oracle (per-term count agreement,
+          v0.24.0); --lang r|auto runs the language-generic loader over the
+          Russian streams (v0.25.0)
   zakonexport-cli ftsearch <query>  full-text scan of the base's `.mb`
           document files (case-insensitive exact word — the legacy app's
           oracle mechanism); reports (file @ offset) hits like the oracle,
@@ -132,6 +134,9 @@ struct Options {
     /// tsearch: cross-check the native exact join against the ftsearch
     /// oracle (per-term count agreement)
     oracle: bool,
+    /// tsearch: the Trident language — "u" (Ukrainian, default), "r"
+    /// (Russian), or "auto" (both, merged)
+    lang: String,
 }
 
 fn parse_args() -> Options {
@@ -162,6 +167,7 @@ fn parse_args() -> Options {
         single: false,
         hl: false,
         oracle: false,
+        lang: String::from("u"),
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -281,6 +287,10 @@ fn parse_args() -> Options {
             "--oracle" => {
                 o.oracle = true;
                 i += 1;
+            }
+            "--lang" if next(i).is_some() => {
+                o.lang = next(i).unwrap().to_lowercase();
+                i += 2;
             }
             other => {
                 pos.push(other.to_string());
@@ -1051,6 +1061,23 @@ pub fn main_cli() {
                     vt_min.map(|x| x.to_string()).unwrap_or("-".into()),
                     vt_max.map(|x| x.to_string()).unwrap_or("-".into()),
                 );
+                // v0.25.0: the language indices — both languages are loaded
+                // and searchable (the loader is language-generic)
+                let rus_records = idx
+                    .rus_vt_stream
+                    .as_ref()
+                    .map(|s| s.records.len())
+                    .unwrap_or(0);
+                println!(
+                    "language-індекси (v0.25.0): ukr lmu.voc={} слів / lmur.vt \
+                     {} u16 · rus lmr.voc={} слів / lmru.vt {} u16 ({} \
+                     record-ів) — tsearch --lang u|r|auto",
+                    idx.dict_words.len(),
+                    idx.vt_u16.len(),
+                    idx.rus_dict_words.len(),
+                    idx.rus_vt_u16.len(),
+                    rus_records
+                );
                 // the exact .voc morphology tables (v0.17.0)
                 if let Some(m) = &idx.morphology {
                     let t = &m.table;
@@ -1381,6 +1408,8 @@ pub fn main_cli() {
                  v0.24.0: tsearch v2 — точний join як primary, пропорційний \\
                  slice як позначений fallback (оцінка) + --oracle (кросчек \\
                  ftsearch, збіг по термінах). \\
+                 v0.25.0: rus-узагальнення — language-generic loader (LangCtx, \\
+                 Lang {{Ukr,Rus}}) + tsearch --lang u|r|auto + trident мовні індекси). \\
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())
@@ -1411,7 +1440,26 @@ pub fn main_cli() {
                 );
                 return Ok(());
             };
-            let r = idx.search(&q);
+            // v0.25.0: the --lang selection (u / r / auto)
+            let auto = matches!(o.lang.as_str(), "auto" | "both");
+            let rus = matches!(o.lang.as_str(), "r" | "rus" | "рус");
+            let lang_label = if auto {
+                "auto (ukr+rus)"
+            } else if rus {
+                "rus"
+            } else {
+                "ukr"
+            };
+            let r = if auto {
+                idx.search_auto(&q)
+            } else {
+                let l = if rus {
+                    crate::trident::Lang::Rus
+                } else {
+                    crate::trident::Lang::Ukr
+                };
+                idx.search_lang(&q, l)
+            };
             let pct = (r.coverage * 100.0).round() as u32;
             // v0.24.0: the --oracle cross-check — per-term native exact-join
             // doc count vs the oracle's distinct-file count (a *count*
@@ -1420,6 +1468,28 @@ pub fn main_cli() {
             // label: >= 0.9 -> "оракельно підтверджено", else the term stays
             // "експеримент (пошук)".
             let terms: Vec<&str> = q.split_whitespace().collect();
+            // v0.25.0: the per-language term doc-count (the oracle check and
+            // the join block both use it; auto = the union of both langs)
+            let term_docs = |t: &str| -> usize {
+                if auto {
+                    let mut set: std::collections::HashSet<u16> =
+                        std::collections::HashSet::new();
+                    for v in idx.term_join_docs_lang(t, crate::trident::Lang::Ukr) {
+                        set.insert(v);
+                    }
+                    for v in idx.term_join_docs_lang(t, crate::trident::Lang::Rus) {
+                        set.insert(v);
+                    }
+                    set.len()
+                } else {
+                    let l = if rus {
+                        crate::trident::Lang::Rus
+                    } else {
+                        crate::trident::Lang::Ukr
+                    };
+                    idx.term_join_docs_lang(t, l).len()
+                }
+            };
             let oracle: Option<crate::ftsearch::OracleCounts> = if o.oracle {
                 Some(crate::ftsearch::oracle_multi(&o.baza, &terms))
             } else {
@@ -1431,7 +1501,7 @@ pub fn main_cli() {
                         .per_term
                         .iter()
                         .map(|(t, ofiles)| {
-                            let tdocs = idx.term_join_docs(t).len();
+                            let tdocs = term_docs(t);
                             crate::ftsearch::OracleTerm::agreement(tdocs, *ofiles)
                         })
                         .sum();
@@ -1448,7 +1518,7 @@ pub fn main_cli() {
                 }
                 None => "експеримент (пошук)".to_string(),
             };
-            println!("Trident tsearch ({label}): «{q}»");
+            println!("Trident tsearch ({label}, {lang_label}): «{q}»");
             println!(
                 "  словник: {} слів · vt-потік: {} u16 · покриття знаків: {}% · \
                  знайдено термінів: {}",
@@ -1459,14 +1529,31 @@ pub fn main_cli() {
             );
             // Show how each term encodes into LmCode (the full cp1251 table):
             //   термін → hex-байти → decode (what those bytes mean).
-            for (term, bytes) in idx.encode_query(&q) {
-                let hex = bytes
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let decoded = crate::trident::decode_lm_word(&bytes);
-                println!("  код: «{term}» → [{hex}] → «{decoded}»");
+            // v0.25.0: per-language (auto shows both, labelled)
+            let enc_langs = if auto {
+                vec![crate::trident::Lang::Ukr, crate::trident::Lang::Rus]
+            } else {
+                vec![if rus {
+                    crate::trident::Lang::Rus
+                } else {
+                    crate::trident::Lang::Ukr
+                }]
+            };
+            for l in &enc_langs {
+                let enc_tag = if auto {
+                    format!(" ({})", if *l == crate::trident::Lang::Rus { "rus" } else { "ukr" })
+                } else {
+                    String::new()
+                };
+                for (term, bytes) in idx.encode_query_lang(&q, *l) {
+                    let hex = bytes
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let decoded = crate::trident::decode_lm_word(&bytes);
+                    println!("  код{enc_tag}: «{term}» → [{hex}] → «{decoded}»");
+                }
             }
             if !r.matched.is_empty() {
                 println!("  збіг: {}", r.matched.join(", "));
@@ -1497,7 +1584,17 @@ pub fn main_cli() {
             let doc_count = render::Base::load(&o.baza)
                 .map(|b| b.doc_count())
                 .unwrap_or(0);
-            let join = crate::trident_join::DocJoin::probe(&idx.vt_u16, doc_count);
+            let join = crate::trident_join::DocJoin::probe(
+                if auto {
+                    // the merged (union) u16 space is the conservative bound
+                    &idx.vt_u16
+                } else if rus {
+                    &idx.rus_vt_u16
+                } else {
+                    &idx.vt_u16
+                },
+                doc_count,
+            );
             let kind = match join.kind {
                 crate::trident_join::JoinKind::Identity => {
                     "Identity (u16-простір цілком в межах поточних docnums)"
@@ -1543,7 +1640,7 @@ pub fn main_cli() {
                     .per_term
                     .iter()
                     .map(|(t, ofiles)| {
-                        let tdocs = idx.term_join_docs(t).len();
+                        let tdocs = term_docs(t);
                         (
                             tdocs,
                             *ofiles,

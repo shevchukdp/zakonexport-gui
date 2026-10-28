@@ -504,6 +504,18 @@ pub struct InventoryFile {
     pub size: u64, // 0 = absent
 }
 
+/// The Trident index language (v0.25.0): the Ukrainian primary base
+/// (`lmu.*`) or the Russian base (`lmr.*`) — the same on-disk formats,
+/// different fold tables and streams. The loader is now language-generic:
+/// both are loaded and searchable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    /// the Ukrainian primary base (`lmu.voc` / `lmur.vt`, `fold.ukr`)
+    Ukr,
+    /// the Russian base (`lmr.voc` / `lmru.vt`, `fold.rus`)
+    Rus,
+}
+
 /// A loaded Trident index (the decodable parts).
 #[derive(Debug, Clone)]
 pub struct TridentIndex {
@@ -511,9 +523,15 @@ pub struct TridentIndex {
     pub kod: Kod,
     pub fold: FoldTables,
     /// dictionary words (LmCode byte vectors), sorted + de-duplicated
+    /// (Ukrainian — the primary base)
     pub dict_words: Vec<Vec<u8>>,
-    /// the u16 posting stream from `.vt` (raw)
+    /// the u16 posting stream from `.vt` (raw; Ukrainian)
     pub vt_u16: Vec<u16>,
+    /// the Russian dictionary words (`lmr.voc`, v0.25.0) — the same record
+    /// grammar, LmCode byte vectors, sorted + de-duplicated
+    pub rus_dict_words: Vec<Vec<u8>>,
+    /// the Russian u16 posting stream from `lmru.vt` (raw, v0.25.0)
+    pub rus_vt_u16: Vec<u16>,
     /// the morphology weight table from `.gw` (raw u16, 0x8000 flag bit)
     pub gw_u16: Vec<u16>,
     /// the decoded `.voc` morphology tables (section table, affixes, suffix
@@ -597,6 +615,17 @@ pub const INVENTORY: [(&str, &str); 16] = [
     ("lmr.use", "usage-прапорці (rus)"),
 ];
 
+/// The per-language search context (v0.25.0): the dictionary, the `.vt`
+/// stream, the raw u16 space, and the fold table for ONE language. The
+/// search methods are language-generic over this; the Ukrainian fields and
+/// the Russian fields each build one.
+struct LangCtx<'a> {
+    dict_words: &'a [Vec<u8>],
+    vt_u16: &'a [u16],
+    vt_stream: Option<&'a crate::trident_vt::VtRecordStream>,
+    fold: &'a Fold,
+}
+
 impl TridentIndex {
     /// Load the Trident index from a base's `SOFT\` folder.
     ///
@@ -648,9 +677,14 @@ impl TridentIndex {
                 .and_then(|off| crate::trident_vt::VmPredicateTable::parse(m, off))
         });
         // the Russian streams + the usage-flags file (v0.20.0)
-        let rus_vt_stream = read("lmru.vt").as_deref().and_then(
-            crate::trident_vt::VtRecordStream::parse,
-        );
+        let rus_vt_bytes = read("lmru.vt");
+        let rus_vt_stream = rus_vt_bytes
+            .as_deref()
+            .and_then(crate::trident_vt::VtRecordStream::parse);
+        // v0.25.0: the Russian dictionary + the raw u16 stream — the same
+        // loaders as the Ukrainian core, so `tsearch --lang r` works
+        let rus_dict_words = read("lmr.voc").map(|voc| extract_dict_words(&voc));
+        let rus_vt_u16 = rus_vt_bytes.as_deref().map(read_vt_u16).unwrap_or_default();
         let ru_bytes = read("lmru.m");
         let rus_vm_header = ru_bytes
             .as_deref()
@@ -686,6 +720,8 @@ impl TridentIndex {
             fold,
             dict_words,
             vt_u16,
+            rus_dict_words: rus_dict_words.unwrap_or_default(),
+            rus_vt_u16,
             gw_u16,
             morphology,
             graph,
@@ -708,6 +744,25 @@ impl TridentIndex {
         soft.join("lmu.voc").is_file() && soft.join("lmur.vt").is_file()
     }
 
+    /// Build the per-language search context (v0.25.0): the dictionary, the
+    /// `.vt` stream, the raw u16 space, and the fold table for ONE language.
+    fn lang_ctx(&self, lang: Lang) -> LangCtx<'_> {
+        match lang {
+            Lang::Ukr => LangCtx {
+                dict_words: &self.dict_words,
+                vt_u16: &self.vt_u16,
+                vt_stream: self.vt_stream.as_ref(),
+                fold: &self.fold.ukr,
+            },
+            Lang::Rus => LangCtx {
+                dict_words: &self.rus_dict_words,
+                vt_u16: &self.rus_vt_u16,
+                vt_stream: self.rus_vt_stream.as_ref(),
+                fold: &self.fold.rus,
+            },
+        }
+    }
+
     /// Experimental native search: encode the query terms, look them up in
     /// the dictionary (prefix-style, with suffix trimming), read a posting
     /// slice from `.vt`.
@@ -718,6 +773,41 @@ impl TridentIndex {
     /// proportional `posting_slice` remains the fallback for terms whose
     /// stem the exact join does not resolve.
     pub fn search(&self, query: &str) -> TridentResult {
+        // the Ukrainian primary base (backward-compatible default)
+        self.search_lang(query, Lang::Ukr)
+    }
+
+    /// The language-generic search (v0.25.0): `lang` selects the fold table
+    /// + dictionary + `.vt` stream. `Ukr` is the primary base; `Rus` runs
+    /// the same pipeline over `lmr.voc` / `lmru.vt` with `fold.rus`.
+    pub fn search_lang(&self, query: &str, lang: Lang) -> TridentResult {
+        self.search_in(&self.lang_ctx(lang), query)
+    }
+
+    /// Search both languages and merge (v0.25.0): the union of the per-term
+    /// `matched` / `joined` evidence and the de-duplicated `docs` fallback.
+    /// Used by `tsearch --lang auto`.
+    pub fn search_auto(&self, query: &str) -> TridentResult {
+        let mut a = self.search_lang(query, Lang::Ukr);
+        let b = self.search_lang(query, Lang::Rus);
+        a.matched.extend(b.matched);
+        a.joined.extend(b.joined);
+        let mut docs = a.docs;
+        docs.extend(b.docs);
+        docs.sort();
+        docs.dedup();
+        a.docs = docs;
+        a.docs_fallback = !a.docs.is_empty();
+        a.dict_size += b.dict_size;
+        a.vt_size += b.vt_size;
+        a
+    }
+
+    /// The per-language search core (v0.25.0): encode the query terms
+    /// through the language's fold table, run the exact stem join (primary
+    /// evidence), and fall back to the proportional `posting_slice` for
+    /// terms the exact join does not resolve.
+    fn search_in(&self, lc: &LangCtx<'_>, query: &str) -> TridentResult {
         let mut matched: Vec<String> = Vec::new();
         let mut docs: Vec<u32> = Vec::new();
         let mut joined: Vec<(String, usize, Vec<u16>)> = Vec::new();
@@ -725,14 +815,14 @@ impl TridentIndex {
         let mut encodable = 0u32;
 
         for raw in query.split_whitespace() {
-            let (bytes, e, total) = encode_term(raw, &self.fold.ukr);
+            let (bytes, e, total) = encode_term(raw, lc.fold);
             total_chars += total;
             encodable += e;
             if bytes.is_empty() {
                 continue;
             }
             // the exact stem join (v0.19.0 primary evidence)
-            let term_hits = self.exact_postings(raw);
+            let term_hits = self.exact_postings_in(lc, raw);
             // candidate byte vectors: the whole term + suffix-trimmed
             // variants (drop 1, 2, 3 trailing bytes — stem-style matching).
             // A candidate matches a dictionary word it is a *prefix* of.
@@ -746,12 +836,12 @@ impl TridentIndex {
                 if cand.is_empty() {
                     continue;
                 }
-                if let Some(idx) = self.find_prefix(&cand) {
+                if let Some(idx) = self.find_prefix_in(lc, &cand) {
                     found = true;
                     // posting slice — the fallback heuristic, kept when the
                     // exact join found nothing for this term
                     if term_hits.is_empty() {
-                        docs.extend(self.posting_slice(idx));
+                        docs.extend(self.posting_slice_in(lc, idx));
                     }
                     break;
                 }
@@ -776,8 +866,8 @@ impl TridentIndex {
             matched,
             joined,
             coverage,
-            dict_size: self.dict_words.len(),
-            vt_size: self.vt_u16.len(),
+            dict_size: lc.dict_words.len(),
+            vt_size: lc.vt_u16.len(),
         }
     }
 
@@ -788,9 +878,25 @@ impl TridentIndex {
     /// Empty when the term is not fully encodable or the `.vt` stream is
     /// absent.
     pub fn term_join_docs(&self, term: &str) -> Vec<u16> {
+        self.term_join_docs_lang(term, Lang::Ukr)
+    }
+
+    /// The distinct u16 doc-ids for one term in the selected language
+    /// (v0.25.0).
+    pub fn term_join_docs_lang(&self, term: &str, lang: Lang) -> Vec<u16> {
+        self.term_join_docs_in(&self.lang_ctx(lang), term)
+    }
+
+    /// The distinct u16 doc-ids contributed by the **exact** stem join for
+    /// one term (v0.24.0): the union of the matching `.vt` records' u16 word
+    /// sets, de-duplicated. This is the per-term native document count the
+    /// `--oracle` cross-check compares against the oracle's file count.
+    /// Empty when the term is not fully encodable or the `.vt` stream is
+    /// absent.
+    fn term_join_docs_in(&self, lc: &LangCtx<'_>, term: &str) -> Vec<u16> {
         let mut set: std::collections::HashSet<u16> =
             std::collections::HashSet::new();
-        for (_, _, u16s) in self.exact_postings(term) {
+        for (_, _, u16s) in self.exact_postings_in(lc, term) {
             for v in u16s {
                 if v != 0 {
                     set.insert(v);
@@ -806,10 +912,16 @@ impl TridentIndex {
     /// return each term with its LmCode byte vector. Used by the CLI to show
     /// exactly how a query maps into the native index.
     pub fn encode_query(&self, query: &str) -> Vec<(String, Vec<u8>)> {
+        self.encode_query_lang(query, Lang::Ukr)
+    }
+
+    /// The per-language query encoding (v0.25.0).
+    pub fn encode_query_lang(&self, query: &str, lang: Lang) -> Vec<(String, Vec<u8>)> {
+        let lc = self.lang_ctx(lang);
         query
             .split_whitespace()
             .map(|t| {
-                let (bytes, _, _) = encode_term(t, &self.fold.ukr);
+                let (bytes, _, _) = encode_term(t, lc.fold);
                 (t.to_string(), bytes)
             })
             .collect()
@@ -819,13 +931,18 @@ impl TridentIndex {
     /// dictionary is sorted bytewise, so a binary search for the first
     /// word >= prefix, then a prefix scan).
     fn find_prefix(&self, prefix: &[u8]) -> Option<usize> {
+        self.find_prefix_in(&self.lang_ctx(Lang::Ukr), prefix)
+    }
+
+    fn find_prefix_in(&self, lc: &LangCtx<'_>, prefix: &[u8]) -> Option<usize> {
+        let dict = lc.dict_words;
         let mut lo = 0usize;
-        let mut hi = self.dict_words.len();
+        let mut hi = dict.len();
         while lo < hi {
             let mid = (lo + hi) / 2;
-            // bytewise: is dict_words[mid] < prefix? (a shorter prefix
+            // bytewise: is dict[mid] < prefix? (a shorter prefix
             // equal to the word's head means the word is NOT below)
-            let w = &self.dict_words[mid];
+            let w = &dict[mid];
             let below = w
                 .iter()
                 .zip(prefix.iter())
@@ -838,7 +955,7 @@ impl TridentIndex {
                 hi = mid;
             }
         }
-        if lo < self.dict_words.len() && self.dict_words[lo].starts_with(prefix) {
+        if lo < dict.len() && dict[lo].starts_with(prefix) {
             Some(lo)
         } else {
             None
@@ -853,16 +970,20 @@ impl TridentIndex {
     /// size. The exact per-word boundaries (and the oracle-validated
     /// doc-number join) come from the packed B-tree decode (roadmap).
     fn posting_slice(&self, word_idx: usize) -> Vec<u32> {
-        if self.vt_u16.is_empty() || self.dict_words.is_empty() {
+        self.posting_slice_in(&self.lang_ctx(Lang::Ukr), word_idx)
+    }
+
+    fn posting_slice_in(&self, lc: &LangCtx<'_>, word_idx: usize) -> Vec<u32> {
+        if lc.vt_u16.is_empty() || lc.dict_words.is_empty() {
             return Vec::new();
         }
-        let n = self.vt_u16.len();
-        let per = n.div_ceil(self.dict_words.len());
+        let n = lc.vt_u16.len();
+        let per = n.div_ceil(lc.dict_words.len());
         let start = word_idx * per;
         let end = (start + per).min(n);
         // keep plausible doc ids (the base has < 1M docs; drop 0 as a
         // terminator marker)
-        self.vt_u16[start..end]
+        lc.vt_u16[start..end]
             .iter()
             .filter(|&&d| d != 0)
             .map(|&d| u32::from(d))
@@ -882,10 +1003,40 @@ impl TridentIndex {
     /// B-tree predicate join (`FUN_100176c0` u16 word table) is blocked on
     /// the tail B-tree decode (v0.20).
     pub fn exact_postings(&self, term: &str) -> Vec<(String, usize, Vec<u16>)> {
-        let Some(stream) = &self.vt_stream else {
+        self.exact_postings_lang(term, Lang::Ukr)
+    }
+
+    /// The exact stem join for the selected language (v0.25.0).
+    pub fn exact_postings_lang(
+        &self,
+        term: &str,
+        lang: Lang,
+    ) -> Vec<(String, usize, Vec<u16>)> {
+        self.exact_postings_in(&self.lang_ctx(lang), term)
+    }
+
+    /// The per-language exact stem join core (v0.25.0): encode `term`
+    /// through the language's fold table, expand it into case-folded Latin
+    /// candidates ([`latin_candidates`]) and look each up in the language's
+    /// `.vt` record stream
+    /// ([`VtRecordStream::find_stem`](crate::trident_vt::VtRecordStream::find_stem)).
+    ///
+    /// Returns `(candidate, record offset, the record's u16 words)` for the
+    /// matching records (deduplicated by record offset, capped at 32).
+    /// Empty when the term is not fully encodable or the `.vt` stream is
+    /// absent. This is the join that replaces the proportional
+    /// [`posting_slice`] heuristic as the *primary* evidence; the full
+    /// B-tree predicate join (`FUN_100176c0` u16 word table) is blocked on
+    /// the tail B-tree decode (v0.20).
+    fn exact_postings_in(
+        &self,
+        lc: &LangCtx<'_>,
+        term: &str,
+    ) -> Vec<(String, usize, Vec<u16>)> {
+        let Some(stream) = lc.vt_stream else {
             return Vec::new();
         };
-        let (bytes, encodable, total) = encode_term(term, &self.fold.ukr);
+        let (bytes, encodable, total) = encode_term(term, lc.fold);
         if bytes.is_empty() || encodable < total {
             return Vec::new();
         }
@@ -1216,6 +1367,8 @@ mod tests {
             fold: FoldTables::default(),
             dict_words: vec![vec![0xE1, 0xA0, 0x30]], // "са0"
             vt_u16: vec![1, 2, 0, 3, 4, 5, 6, 7],
+            rus_dict_words: Vec::new(),
+            rus_vt_u16: Vec::new(),
             gw_u16: Vec::new(),
             morphology: None,
             graph: None,
@@ -1392,5 +1545,62 @@ mod tests {
         );
         // an unknown word yields nothing
         assert!(idx.term_join_docs("zzzz").is_empty());
+    }
+
+    /// v0.25.0: the Russian core loads (the language-generic loader).
+    #[test]
+    fn rus_index_loads_the_rus_core() {
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let idx = TridentIndex::open(baza).expect("index should load");
+        // the Russian fold table is the 32-pair R section (real)
+        assert_eq!(idx.fold.rus.len(), 32, "the R section has 32 pairs");
+        // the Russian dictionary + the raw u16 stream load from lmr.voc /
+        // lmru.vt (the v0.25.0 language-generic loaders)
+        assert!(
+            !idx.rus_dict_words.is_empty(),
+            "the lmr.voc dictionary should yield words"
+        );
+        assert!(!idx.rus_vt_u16.is_empty(), "lmru.vt should have a u16 stream");
+        // the Russian `.vt` record stream parses (14421 records, v0.20.0)
+        let rus_stream = idx
+            .rus_vt_stream
+            .as_ref()
+            .expect("the lmru.vt stream should parse");
+        assert_eq!(
+            rus_stream.records.len(),
+            14421,
+            "the lmru.vt stream has 14421 records"
+        );
+    }
+
+    /// v0.25.0: `tsearch --lang r` «закон» prints joined records (the rus
+    /// exact join resolves the Russian stem against the `lmru.vt` stream).
+    #[test]
+    fn tsearch_lang_r_resolves_a_rus_stem() {
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let idx = TridentIndex::open(baza).expect("index should load");
+        // «закон» through fold.rus resolves a Russian stem in lmru.vt
+        let r = idx.search_lang("закон", Lang::Rus);
+        assert!(
+            !r.joined.is_empty() || !r.docs.is_empty() || !r.matched.is_empty(),
+            "the rus search must produce evidence (join / fallback / dict)"
+        );
+        // the auto merge runs both languages and combines the evidence
+        let r_auto = idx.search_auto("закон");
+        assert!(
+            r_auto.dict_size >= idx.dict_words.len(),
+            "auto merges both dictionaries (ukr + rus)"
+        );
+        // an unknown term yields nothing in the rus language too
+        let r_z = idx.search_lang("zzzz", Lang::Rus);
+        assert!(r_z.matched.is_empty() && r_z.joined.is_empty());
     }
 }

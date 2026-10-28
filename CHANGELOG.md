@@ -104,6 +104,80 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.20.0 — 2026-10-28
+
+### UK
+- **Tail-секція `.vt` декодована (v0.20.0 finding): в old-format
+  файлах ВОНА ПОРОЖНЯ.** `VtTailScan` (`FUN_100134d0`: у хвісті
+  `u8 N` + N записів `[NUL-рядок][u16-список 0x0000]`) на реальному
+  `lmur.vt`/`lmru.vt` дає **N = 0** — tail-покажець лежить всередині
+  останніх 4 байтів файлу (сам u32 LE). Отже u16 word/predicate-
+  таблиці, яких потребує join-ядро (`ctx+0x30`/`ctx+0x44`,
+  `FUN_100176c0`/`FUN_10015cd0`), DLL read-mode виводить **не з
+  `.vt` хвоста**, а з B-tree `.voc` — наступний RE-крок (v0.21+).
+- **Wildcard-матчер `tail_match` портовано** (`FUN_100135d0`):
+  `*` (зірки їдуть на `L−M`, fail при `L<M` — збережена
+  decompiled-логіка), `N` = будь-який байт, `R` = клас
+  розділювачів `{; : & ,}` + quirk `-` (лише 1-байтний решток),
+  `L` = літера (приблизно ASCII/Cyrillic; property-таблиця
+  `FUN_10011580` — окрема екстракція), інший байт = case-folded
+  рівність (fold обидох боків — надмножина DLL-поведення).
+  Синтетичні тести на всіх семантиках.
+- **`.use` usage-прапорці декодовано** (`UseFile`): `lmu.use`/
+  `lmr.use` = 64B-заголовок + **140B нульового body** (прапорці в
+  цій базі не ввімкнені; `lmu.use` name = `lmU.use`).
+- **Руська база завантажується** (`TridentIndex`): `lmru.vt`
+  (`VtRecordStream`: **14421 record-ів** `0x40..0xd2648`, walk
+  приходить в хвіст; стеблі `NET`/`PER`/`PO` підтверджені),
+  `lmru.m` (`VmHeader`: u32-таблиця `0xC20, 0x88, 0xBD8, 0x56B,
+  0x99, 0x1ACF, 0x2000, 0x25C1`, хвіст @0x53E). Руський join
+  (словник `lmr.voc` + rus tsearch) — далі.
+- **CLI `trident`** — нові блоки: `lmru.vt: 14421 record-ів
+  0x40..0xd2648`, `lmru.m: u32-таблиця + хвіст @0x53e`, `lmU.use:
+  204 Б (body 140 Б, усі 0)`, `tail-scan (FUN_100134d0) @0xccde5:
+  N=0 (old-format .vt — хвіст порожній; u16 таблиці — з .voc
+  B-tree, v0.21+)`.
+- **130 юніт-тестів**. Guitest baseline `rows=430` без змін.
+  Версія **0.19.0 → 0.20.0**.
+
+### EN
+- **The `.vt` tail section decoded (v0.20.0 finding): in the
+  old-format files it is EMPTY.** `VtTailScan` (`FUN_100134d0`: a
+  `u8 N` at the tail + `N` `[NUL string][u16 list 0x0000]`
+  records) yields **N = 0** on the real `lmur.vt` / `lmru.vt` —
+  the tail pointer sits inside the last 4 file bytes (the LE u32
+  itself). So the u16 word/predicate tables the join core needs
+  (`ctx+0x30`/`ctx+0x44`, `FUN_100176c0`/`FUN_10015cd0`) are
+  derived by the DLL read-mode **from the `.voc` B-tree, not the
+  `.vt` tail** — the next RE step (v0.21+).
+- **The wildcard matcher `tail_match` is ported** (`FUN_100135d0`):
+  `*` (stars advance by `L−M`, fail on `L<M` — the decompiled
+  logic preserved), `N` = any byte, `R` = the separator class
+  `{; : & ,}` + the `-` quirk (only a 1-byte remainder), `L` = a
+  letter (approximated as ASCII/Cyrillic; the `FUN_10011580`
+  property table is a separate extraction), any other byte = a
+  case-folded equality (both sides folded — a superset of the
+  DLL behavior). Synthetic tests over all the semantics.
+- **The `.use` usage flags decoded** (`UseFile`): `lmu.use` /
+  `lmr.use` = the 64-byte header + an **all-zero 140-byte body**
+  (the flags are not enabled in this base; `lmu.use` name =
+  `lmU.use`).
+- **The Russian base loads** (`TridentIndex`): `lmru.vt`
+  (`VtRecordStream`: **14421 records** `0x40..0xd2648`, the walk
+  lands on the tail; the `NET`/`PER`/`PO` stems confirmed),
+  `lmru.m` (`VmHeader`: the u32 table `0xC20, 0x88, 0xBD8, 0x56B,
+  0x99, 0x1ACF, 0x2000, 0x25C1`, tail @0x53E). The Russian join
+  (the `lmr.voc` dictionary + the rus `tsearch`) comes next.
+- **CLI `trident`** — new blocks: `lmru.vt: 14421 records
+  0x40..0xd2648`, `lmru.m: u32 table + tail @0x53e`, `lmU.use:
+  204 B (body 140 B, all zero)`, `tail-scan (FUN_100134d0)
+  @0xccde5: N=0 (old-format .vt — the tail is empty; the u16
+  tables come from the .voc B-tree, v0.21+)`.
+- **130 unit tests**. The guitest baseline `rows=430` is
+  unchanged. Version **0.19.0 → 0.20.0**.
+
+---
+
 ## v0.18.1 — 2026-10-27
 
 ### UK

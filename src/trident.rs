@@ -528,6 +528,15 @@ pub struct TridentIndex {
     /// the `.m` per-word metadata header (64-byte header + the u32 table
     /// @0x40, v0.19.0) — `None` when `lmur.m` is absent
     pub vm_header: Option<crate::trident_vt::VmHeader>,
+    /// the Russian `.vt` record stream (`lmru.vt`, v0.20.0) — the same
+    /// packed grammar, Latin stems of the `lmr.voc` dictionary
+    /// (`NET`/`PER`/`PO` confirmed present)
+    pub rus_vt_stream: Option<crate::trident_vt::VtRecordStream>,
+    /// the Russian `.m` metadata header (`lmru.m`, v0.20.0)
+    pub rus_vm_header: Option<crate::trident_vt::VmHeader>,
+    /// the `lmu.use` usage-flags file (v0.20.0; the body is all zeros in
+    /// this base — the 2005-era index does not enable the flags)
+    pub use_flags: Option<crate::trident_vt::UseFile>,
     pub inventory: Vec<InventoryFile>,
 }
 
@@ -604,6 +613,16 @@ impl TridentIndex {
         let vm_header = read("lmur.m")
             .as_deref()
             .and_then(|m| crate::trident_vt::VmHeader::parse(m, 8));
+        // the Russian streams + the usage-flags file (v0.20.0)
+        let rus_vt_stream = read("lmru.vt").as_deref().and_then(
+            crate::trident_vt::VtRecordStream::parse,
+        );
+        let rus_vm_header = read("lmru.m")
+            .as_deref()
+            .and_then(|m| crate::trident_vt::VmHeader::parse(m, 8));
+        let use_flags = read("lmu.use")
+            .as_deref()
+            .and_then(crate::trident_vt::UseFile::parse);
 
         let inventory: Vec<InventoryFile> = INVENTORY
             .iter()
@@ -625,6 +644,9 @@ impl TridentIndex {
             graph,
             vt_stream,
             vm_header,
+            rus_vt_stream,
+            rus_vm_header,
+            use_flags,
             inventory,
         })
     }
@@ -1125,6 +1147,9 @@ mod tests {
             graph: None,
             vt_stream: None,
             vm_header: None,
+            rus_vt_stream: None,
+            rus_vm_header: None,
+            use_flags: None,
             inventory: Vec::new(),
         };
         let r = idx.search("а0"); // encodes to [0xA4, 0x30] — no match
@@ -1161,6 +1186,17 @@ mod tests {
         // the inventory must list 16 files, all present in this base
         assert_eq!(idx.inventory.len(), 16);
         assert!(idx.inventory.iter().all(|f| f.size > 0));
+        // v0.20.0: the Russian streams + the usage-flags file
+        assert!(
+            idx.rus_vt_stream.is_some(),
+            "the lmru.vt stream should parse"
+        );
+        assert!(idx.rus_vm_header.is_some(), "the lmru.m header should parse");
+        assert!(idx.use_flags.is_some(), "the lmu.use file should parse");
+        assert!(
+            idx.use_flags.as_ref().unwrap().body_is_zero(),
+            "the usage flags are not enabled in this base"
+        );
     }
 
     #[test]

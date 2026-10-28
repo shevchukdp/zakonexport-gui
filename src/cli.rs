@@ -1073,6 +1073,56 @@ pub fn main_cli() {
                         m.header.tail,
                     );
                 }
+                // v0.20.0: the Russian streams + the usage-flags file
+                if let Some(s) = &idx.rus_vt_stream {
+                    println!(
+                        "lmru.vt: {} — rus posting record stream: {} \
+                         record-ів 0x40..0x{:x}",
+                        s.header.name,
+                        s.records.len(),
+                        s.end,
+                    );
+                }
+                if let Some(m) = &idx.rus_vm_header {
+                    let table: Vec<String> =
+                        m.table.iter().map(|v| format!("0x{v:x}")).collect();
+                    println!(
+                        "lmru.m: {} — rus метадані · u32-таблиця @0x40: {} · \
+                         хвіст @0x{:x}",
+                        m.header.name,
+                        table.join(" "),
+                        m.header.tail,
+                    );
+                }
+                if let Some(u) = &idx.use_flags {
+                    println!(
+                        "{}: {} Б (body {} Б, {} — usage-прапорці \
+                         (не ввімкнені в цій базі))",
+                        u.header.name,
+                        0x40 + u.body.len(),
+                        u.body.len(),
+                        if u.body_is_zero() {
+                            "усі 0"
+                        } else {
+                            "не нульові"
+                        },
+                    );
+                }
+                // the FUN_100134d0 tail scan (v0.20.0): the old-format .vt
+                // files carry an empty tail (N = 0) — the u16 word/
+                // predicate tables come from the .voc B-tree (v0.21+)
+                if let Some(s) = &idx.vt_stream {
+                    let ts = std::fs::read(o.baza.join("SOFT").join("lmur.vt"))
+                        .ok()
+                        .and_then(|b| crate::trident_vt::VtTailScan::parse(&b, s.end));
+                    println!(
+                        "tail-scan (FUN_100134d0) @0x{:x}: N={} (old-format .vt — \
+                         хвіст порожній; u16 word/predicate-таблиці виводяться з \
+                         .voc B-tree — далі (v0.21+))",
+                        s.end,
+                        ts.as_ref().map(|t| t.count).unwrap_or(0),
+                    );
+                }
                 if let Some(p) = idx.morphology.as_ref().and_then(|m| m.params) {
                     println!(
                         "lmu.voc параметри @0x80: stop=0x{:02x} блок=0x{:x} \
@@ -1120,7 +1170,10 @@ v0.17.0; записники lmu.voc (FUN_10004230 record-walker: кордони 
 block-resync packed B-tree) — v0.18.0; граф lmu.g — структурно декодовано, \
 v0.19.0: точний stem-join word→.vt (posting record stream lmur.vt + header \
                  lmur.m + параметри lmu.voc @0x80); семантика ребер lmu.g + \
-                 B-tree-VM хвоста (FUN_100019f0) — далі (v0.20). \
+B-tree-VM хвоста (FUN_100019f0) — далі (v0.21); v0.20.0: tail-scan \
+                 (FUN_100134d0 — у old-format .vt N=0, хвіст порожній) + \
+                 wildcard-матчер (FUN_100135d0) + .use usage-прапорці \
+                 (body=0) + rus-стріми lmru.vt/lmru.m (14421 record-ів). \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

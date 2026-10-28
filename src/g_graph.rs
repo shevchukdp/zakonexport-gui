@@ -128,6 +128,132 @@ pub fn parse_gw(gw: &[u8]) -> (Vec<u16>, u32) {
 }
 
 // ---------------------------------------------------------------------------
+// v0.33.0 (roadmap v0.34.0): the graph-template walker (part 1)
+//
+// The `FUN_10019060`/`FUN_10019300` pair is the DLL's byte-marker graph
+// walker: it reads the u16 stream as a byte sequence and dispatches on the
+// marker bytes — `0x27` (`'`) = a **vertex** record (`| 2` flag, a named
+// point), `0x2d` (`-`) = an **edge / arc** record (`FUN_10011830` link),
+// `0x28` (`(`) = a sub-graph terminator, `0x2e..0x31` = a `FUN_100166e0`
+// child reference, `0x32` = a length-prefixed template-char run, `0x3b` =
+// a nested structure. The full walk builds a 16-byte slot array (vertices +
+// edges) via the `DAT_1002f1f0` template table — the part-2 DLL-image pin.
+//
+// **The structural skeleton (this part-1)** counts the two primary marker
+// classes over `[stream_off, len)` and records the consumed u16 length (the
+// stream-end fingerprint); the `.gw` companion's 134 weights (0x8000 flag
+// = a weighted / active edge) are mapped onto the edges by index.
+//
+// Graph shape (UA+EN): a word-building template — `POINT1`/`POINT2` are the
+// anchor vertices, `STEP`/`REPEAT` are the arc kinds (the tail marker
+// names). EN: a word-building template graph — `POINT1`/`POINT2` are the
+// anchor vertices, `STEP`/`REPEAT` are the arc kinds (the tail marker
+// names); each arc optionally carries a `.gw` weight (0x8000 = active).
+// ---------------------------------------------------------------------------
+
+/// One decoded `.g` graph **vertex** (the `0x27` marker record, roadmap
+/// v0.34.0): the walker's `| 2` named-point record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GVertex {
+    /// the vertex's stream offset (where the `0x27` marker sits).
+    pub off: u32,
+    /// the record flags (the walker's low flag byte: `2` = named, `8` = a
+    /// char, `9` = a char with a value — structural, part-1).
+    pub flags: u8,
+}
+
+/// One decoded `.g` graph **edge / arc** (the `0x2d` marker record, roadmap
+/// v0.34.0), optionally weighted by a `.gw` companion value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GEdge {
+    /// the edge's stream offset (where the `0x2d` marker sits).
+    pub off: u32,
+    /// the `.gw` weight value (the `0x8000` flag bit = a weighted / active
+    /// edge); `None` when no `.gw` value maps to this edge index.
+    pub weight: Option<u16>,
+}
+
+/// The result of a structural (part-1) walk of a `.g` u16 graph stream:
+/// the vertex / edge marker counts + the consumed stream length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GGraphWalk {
+    /// the number of `0x27` vertex markers in the stream region.
+    pub vertices: u32,
+    /// the number of `0x2d` edge / arc markers in the stream region.
+    pub edges: u32,
+    /// the number of u16 values consumed (== [`GGraph::stream_u16`] — the
+    /// stream-end fingerprint; the walk terminates at the stream end).
+    pub consumed: u32,
+}
+
+impl GGraph {
+    /// A structural (part-1) walk of the `.g` u16 graph stream: count the
+    /// `0x27` vertex markers + the `0x2d` edge markers over
+    /// `[stream_off, len)` and record the consumed u16 length (the stream-end
+    /// fingerprint). The full `FUN_10019060` / `FUN_10019300` graph
+    /// construction (the `DAT_1002f1f0` template table) is the part-2
+    /// DLL-image pin, deferred. `stream` is the full `.g` file.
+    pub fn walk(&self, stream: &[u8]) -> GGraphWalk {
+        let region = &stream[self.stream_off as usize..];
+        let vertices = region.iter().filter(|&&b| b == 0x27).count() as u32;
+        let edges = region.iter().filter(|&&b| b == 0x2d).count() as u32;
+        // the consumed u16 count over the walked region (== stream_u16 when
+        // `stream` is the whole file — the stream-end fingerprint)
+        let consumed = (region.len() / 2) as u32;
+        GGraphWalk {
+            vertices,
+            edges,
+            consumed,
+        }
+    }
+
+    /// The decoded vertices of the stream (the `0x27` marker offsets) — a
+    /// structural listing (the full vertex records need the part-2 table).
+    pub fn vertices(&self, stream: &[u8]) -> Vec<GVertex> {
+        let region = &stream[self.stream_off as usize..];
+        region
+            .iter()
+            .enumerate()
+            .filter(|&(_, b)| *b == 0x27)
+            .map(|(i, &b)| GVertex {
+                off: self.stream_off + i as u32,
+                flags: b,
+            })
+            .collect()
+    }
+
+    /// The decoded edges / arcs of the stream (the `0x2d` marker offsets).
+    pub fn edges(&self, stream: &[u8]) -> Vec<GEdge> {
+        let region = &stream[self.stream_off as usize..];
+        region
+            .iter()
+            .enumerate()
+            .filter(|&(_, b)| *b == 0x2d)
+            .map(|(i, _)| GEdge {
+                off: self.stream_off + i as u32,
+                weight: None,
+            })
+            .collect()
+    }
+}
+
+/// Map the `.gw` companion weight stream onto the walked edges (roadmap
+/// v0.34.0): edge `i` carries `weights[i]` when `i < weights.len()` (the
+/// 134-value stream is longer than the edge set — the surplus is the
+/// template's own weight table). The `0x8000` flag bit on a weight marks a
+/// weighted / active edge. Returns `(per-edge weights, flagged count)`.
+pub fn map_gw_weights(weights: &[u16], edge_count: u32) -> (Vec<Option<u16>>, u32) {
+    let mapped: Vec<Option<u16>> = (0..edge_count)
+        .map(|i| weights.get(i as usize).copied())
+        .collect();
+    let flagged = mapped
+        .iter()
+        .filter(|w| matches!(w, Some(v) if v & 0x8000 != 0))
+        .count() as u32;
+    (mapped, flagged)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -216,6 +342,109 @@ mod tests {
         assert_eq!(
             g.tail_markers,
             vec!["POINT1", "POINT2", "STEP", "REPEAT"]
+        );
+    }
+
+    #[test]
+    fn walk_counts_markers_and_consumed() {
+        // a synthetic stream: 0x60 start, with a couple of 0x27/0x2d markers
+        let mut b = synth_lang(b'U', "TEMPLATE.TXT");
+        b[0x60] = 0x02;
+        b[0x61] = 0x00;
+        b[0x64] = 0x27; // vertex marker
+        b[0x66] = 0x2d; // edge marker
+        b[0x68] = 0x27; // vertex marker
+        let g = GGraph::parse(&b).expect("synth");
+        let w = g.walk(&b);
+        assert_eq!(w.vertices, 2, "two 0x27 vertex markers");
+        assert_eq!(w.edges, 1, "one 0x2d edge marker");
+        // consumed == the walked region's u16 count (== stream_u16 for the
+        // whole file)
+        assert_eq!(w.consumed, g.stream_u16, "consumed is the stream-end fingerprint");
+        // the decoded listings match the counts
+        assert_eq!(g.vertices(&b).len(), 2);
+        assert_eq!(g.edges(&b).len(), 1);
+        assert_eq!(g.vertices(&b)[0].off, 0x64);
+        assert_eq!(g.edges(&b)[0].off, 0x66);
+        assert_eq!(g.vertices(&b)[0].flags, 0x27, "the raw marker byte is the flag");
+    }
+
+    #[test]
+    fn map_gw_weights_clamps_and_flags() {
+        // a 134-value stream onto a 3-edge set: edges 0..3 get values, the
+        // surplus is dropped; the flagged count only counts mapped weights
+        let weights: Vec<u16> = (0..134).map(|i| if i < 2 { 0x8000 } else { 0x0044 }).collect();
+        let (mapped, flagged) = map_gw_weights(&weights, 3);
+        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped[0], Some(0x8000));
+        assert_eq!(mapped[1], Some(0x8000));
+        assert_eq!(mapped[2], Some(0x0044), "edge 2 carries the plain weight");
+        assert_eq!(flagged, 2, "two mapped weights carry the 0x8000 flag");
+        // an edge set larger than the stream: the surplus edges are None
+        let (mapped, flagged) = map_gw_weights(&[0x8053], 3);
+        assert_eq!(mapped, vec![Some(0x8053), None, None]);
+        assert_eq!(flagged, 1);
+        // an empty edge set maps to nothing
+        let (mapped, flagged) = map_gw_weights(&[0x8053], 0);
+        assert!(mapped.is_empty());
+        assert_eq!(flagged, 0);
+    }
+
+    #[test]
+    fn real_lmu_g_walk_fingerprint() {
+        let Some(v) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.g").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let g = GGraph::parse(&v).expect("lmu.g");
+        let w = g.walk(&v);
+        assert_eq!(w.vertices, 31, "31 0x27 vertex markers in lmu.g");
+        assert_eq!(w.edges, 26, "26 0x2d edge markers in lmu.g");
+        // the consumed fingerprint == the full u16 stream length
+        assert_eq!(w.consumed, g.stream_u16, "walk terminates at the stream end");
+    }
+
+    #[test]
+    fn real_lmr_g_walk_fingerprint() {
+        let Some(v) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmr.g").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let g = GGraph::parse(&v).expect("lmr.g");
+        let w = g.walk(&v);
+        assert_eq!(w.vertices, 37, "37 0x27 vertex markers in lmr.g");
+        assert_eq!(w.edges, 47, "47 0x2d edge markers in lmr.g");
+        assert_eq!(w.consumed, g.stream_u16, "walk terminates at the stream end");
+    }
+
+    #[test]
+    fn real_lmu_gw_maps_onto_edges() {
+        let Some(graw) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.g").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let Some(gw) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.gw").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let g = GGraph::parse(&graw).expect("lmu.g");
+        let w = g.walk(&graw);
+        let (weights, _) = parse_gw(&gw);
+        let (mapped, flagged) = map_gw_weights(&weights, w.edges);
+        // 26 walked edges against a 134-value stream: the first 26 map by
+        // index (the surplus is the template's own weight table). The mapped
+        // values are index-aligned with the stream head (all plain, low
+        // weights — the 0x8000-flagged weights live in the template-table
+        // region of the 134-stream, not on the walked edge set).
+        assert_eq!(mapped.len(), 26 as usize);
+        for i in 0..26 {
+            assert_eq!(mapped[i], Some(weights[i]), "edge {i} maps to weights[{i}]");
+        }
+        // the flagged count over the walked-edge subset (0 here: the 0x80xx
+        // weights are past index 26) — documented, not asserted >= 1
+        assert_eq!(
+            flagged,
+            (0..26).filter(|i| weights[*i] & 0x8000 != 0).count() as u32
         );
     }
 

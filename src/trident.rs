@@ -543,6 +543,9 @@ pub struct TridentIndex {
     /// the structurally decoded `.g` grammar graph (header + stream
     /// fingerprint) — `None` when `lmu.g` is absent
     pub graph: Option<crate::g_graph::GGraph>,
+    /// the raw `lmu.g` bytes (v0.33.0: the graph-template walker re-parses
+    /// the u16 stream against these; empty when the `.g` is absent)
+    pub graph_raw: Vec<u8>,
     /// the exact `.vt` record stream (14160 packed NUL records
     /// `0x40..header[0x3C]`, v0.19.0) — `None` when the stream walk fails
     pub vt_stream: Option<crate::trident_vt::VtRecordStream>,
@@ -663,7 +666,8 @@ impl TridentIndex {
         // the exact `.voc` section table + morphology tables (v0.17.0)
         let morphology = crate::trident_voc::Morphology::parse(&voc);
         // the `.g` grammar graph (structural decode: header + stream fingerprint)
-        let graph = read("lmu.g").as_deref().and_then(crate::g_graph::GGraph::parse);
+        let g_bytes = read("lmu.g");
+        let graph = g_bytes.as_deref().and_then(crate::g_graph::GGraph::parse);
         // the exact `.vt` record stream + `.m` metadata header (v0.19.0)
         let vt_stream = crate::trident_vt::VtRecordStream::parse(&vt);
         // the u16 tables now need the `.m` bytes twice (header + the
@@ -748,6 +752,7 @@ impl TridentIndex {
             lmu_voc: voc,
             morphology,
             graph,
+            graph_raw: g_bytes.unwrap_or_default(),
             vt_stream,
             vm_header,
             word_table,
@@ -1390,6 +1395,7 @@ mod tests {
             lmu_voc: Vec::new(),
             morphology: None,
             graph: None,
+            graph_raw: Vec::new(),
             vt_stream: None,
             vm_header: None,
             word_table: None,

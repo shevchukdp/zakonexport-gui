@@ -39,6 +39,7 @@ Usage:
           .voc root B-tree (v0.30.0: FUN_10002b70 root-node decode + pool-descent skeleton);
           .voc dense nodes (v0.31.0: 4096-resync 15 slots + 722/2157 listA/listB reconciliation);
           .voc 'f' opcode-VM (v0.32.0: FUN_100044f0 142 programs, run_f_program + count invariant);
+          .g graph-template walker (v0.33.0: FUN_10019060 0x27-vertex/0x2d-edge markers + .gw weight map);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -1524,6 +1525,22 @@ pub fn main_cli() {
                         gw_flag
                     );
                     println!("  граф head: {}…", head.join(" "));
+                    // v0.33.0: the graph-template walker (part 1) — the
+                    // 0x27 vertex / 0x2d edge marker counts + the `.gw`
+                    // weight→edge map (roadmap v0.34.0)
+                    let w = g.walk(&idx.graph_raw);
+                    let (mapped, gw_edge_flag) =
+                        crate::g_graph::map_gw_weights(&idx.gw_u16, w.edges);
+                    println!(
+                        "g-walk (v0.33.0, FUN_10019060): vertices {} (0x27) · \
+                         edges {} (0x2d) · consumed {} u16 · lmu.gw → {} ребер \
+                         ({} прап. 0x8000)",
+                        w.vertices,
+                        w.edges,
+                        w.consumed,
+                        mapped.iter().filter(|o| o.is_some()).count(),
+                        gw_edge_flag
+                    );
                 }
             }
             println!();
@@ -1563,6 +1580,8 @@ pub fn main_cli() {
                   722/2157 listA/listB reconciliation, delta 1435, dense shortfalls 334/1775).\\\
                   v0.32.0: .voc 'f' opcode-VM (run_f_program — FUN_100044f0 0x1001..04 executor + \\\
                   Morphology.f_programs report; 142/142 terminate at 0x1002, 176 word-leaf hits). \\\
+                  v0.33.0: .g graph-template walker (GGraph::walk - FUN_10019060 0x27-vertex/0x2d-edge markers + map_gw_weights lmu.gw->edges) \\\
+                  31v/26e lmu.g, 37v/47e lmr.g, consumed == stream_u16, .gw flagged edges) \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

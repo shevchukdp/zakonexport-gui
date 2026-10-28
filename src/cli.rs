@@ -41,6 +41,7 @@ Usage:
           .voc 'f' opcode-VM (v0.32.0: FUN_100044f0 142 programs, run_f_program + count invariant);
           .g graph-template walker (v0.33.0: FUN_10019060 0x27-vertex/0x2d-edge markers + .gw weight map);
           exact Latin mapping (v0.34.0: latin_exact preferred-variant exact path + real-corpus .vt hit rate);
+          legacy-engine parity (v0.35.0: lmsup.dll NE 16-bit no-LMaster_* vs lmsup32.dll PE32 LMaster_{{Begin,End,Lang,Tran}});
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -1106,6 +1107,12 @@ pub fn main_cli() {
                 }
             }
             println!();
+            // v0.35.0: the legacy-engine parity (roadmap v0.36.0) — the
+            // lmsup*.dll API-surface delta (NE 16-bit vs PE32 x86)
+            println!(
+                "lmsup.dll (NE 16-bit New Executive, no LMaster_* exports) · \
+                 lmsup32.dll (PE32 x86 0x14c): LMaster_{{Begin,End,Lang,Tran}}"
+            );
             if let Some(idx) = crate::trident::TridentIndex::open(&o.baza) {
                 let vt_min = idx.vt_u16.iter().copied().min();
                 let vt_max = idx.vt_u16.iter().copied().max();
@@ -1596,6 +1603,7 @@ pub fn main_cli() {
                   31v/26e lmu.g, 37v/47e lmr.g, consumed == stream_u16, .gw flagged edges) \\\
                   v0.34.0: .g exact-Latin mapping (latin_exact - preferred-variant exact path, uncapped; LATIN_VARIANTS demoted to documented fallback) \\\
                   exact_postings prefers the exact candidate; real-corpus .vt hit rate recorded (100% awaits the DAT_1002f1f0 graph norm). \\\
+                  v0.35.0: legacy-engine parity (lmsup.dll NE 16-bit New Executive no LMaster_* vs lmsup32.dll PE32 x86 0x14c LMaster_{{Begin,End,Lang,Tran}}; repaired dump_dll_exports.cjs). \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

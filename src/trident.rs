@@ -18,7 +18,8 @@
 //! | lmru.m      | metadata registry (Russian)                         |
 //! | lmu.g/.gw   | morphology grammar / graph weights (Ukrainian)      |
 //! | lmr.g/.gw   | morphology grammar / graph weights (Russian)        |
-//! | lmsup*.dll  | the 16/32-bit engine (exports `LMaster_*`)          |
+//! | lmsup.dll   | the legacy NE 16-bit engine (New Executive; NO `LMaster_*` exports) |
+//! | lmsup32.dll | the 32-bit engine (PE32 x86 I386; exports `LMaster_{Begin,End,Lang,Tran}`) |
 //!
 //! Word bytes live in a custom "LmCode" byte space. The slot order is
 //! **cp1251-based** (confirmed by `windows.kod`, the DLL keyboard table and
@@ -65,6 +66,28 @@
 //! dictionary (prefix-style, with suffix trimming) and reads a posting
 //! slice from `.vt`. It reports its coverage so the caller knows how much
 //! of the query was actually encoded.
+//!
+//! **Legacy-engine parity (v0.35.0, roadmap v0.36.0) — the `lmsup*.dll`
+//! API/constant delta (UA+EN).** The two "engines" are *different image
+//! formats*: `lmsup.dll` (179520 B) is a **16-bit New Executive (NE)**
+//! image (the legacy Windows 3.x/9x engine), while `lmsup32.dll` (200704 B)
+//! is a **PE32 x86** (I386, `0x14c`) image. The export surface differs
+//! sharply:
+//!
+//! | image        | size (B) | format          | machine | `LMaster_*` exports              |
+//! |--------------|----------|-----------------|---------|----------------------------------|
+//! | `lmsup.dll`   | 179520   | NE (16-bit)     | 0x446   | **zero** (no `LMaster_*` name)  |
+//! | `lmsup32.dll` | 200704   | PE32 x86 (I386) | 0x14c   | exactly `LMaster_{Begin,End,Lang,Tran}` |
+//!
+//! EN: `lmsup.dll` is a legacy **16-bit New Executive** image (machine
+//! `0x446`) that exports **no** `LMaster_*` symbols by name (the legacy
+//! engine predates the 32-bit API); `lmsup32.dll` is the **PE32 x86**
+//! successor (machine `0x14c`) whose export surface is exactly
+//! `LMaster_{Begin,End,Lang,Tran}` (4 named exports, verified by the
+//! repaired `dump_dll_exports.cjs`). The shared data tables (stop markers,
+//! `WALK_BLOCK 0x1000`, the casefold-table init) are byte-identical across
+//! the two `.text` sections — the divergence is the image format + export
+//! table, not the data tables.
 
 use std::path::{Path, PathBuf};
 
@@ -657,8 +680,8 @@ pub const INVENTORY: [(&str, &str); 16] = [
     ("lmr.g", "граф (rus)"),
     ("lmu.gw", "граф-weight (ukr)"),
     ("lmr.gw", "граф-weight (rus)"),
-    ("lmsup.dll", "рушій (16-біт)"),
-    ("lmsup32.dll", "рушій (32-біт)"),
+    ("lmsup.dll", "рушій (NE 16-біт, New Executive; без LMaster_*)"),
+    ("lmsup32.dll", "рушій (PE32 x86 0x14c; LMaster_{Begin,End,Lang,Tran})"),
     ("windows.kod", "кодовий набір"),
     ("lm.a", "fold-таблиці (E/G/R/U)"),
     ("lmu.use", "usage-прапорці (ukr)"),
@@ -1259,6 +1282,61 @@ pub fn read_vt_u16(vt: &[u8]) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_engine_parity_ne_vs_pe32_dlls() {
+        // v0.35.0 (roadmap v0.36.0): the two "engines" are different image
+        // formats — lmsup.dll is a 16-bit NE (New Executive) image, and
+        // lmsup32.dll is the PE32 x86 successor with the LMaster_* API.
+        let soft = Path::new(r"C:\Zakon.Local\Baza\SOFT");
+        let Some(lmsup) = std::fs::read(soft.join("lmsup.dll")).ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let Some(lmsup32) = std::fs::read(soft.join("lmsup32.dll")).ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        // the NE signature (New Executive, 16-bit) at the DOS e_lfanew
+        let elf = u32::from_le_bytes([
+            lmsup[0x3c],
+            lmsup[0x3c + 1],
+            lmsup[0x3c + 2],
+            lmsup[0x3c + 3],
+        ]) as usize;
+        assert_eq!(
+            &lmsup[elf..elf + 2],
+            b"NE",
+            "lmsup.dll is an NE (New Executive) image"
+        );
+        // the legacy NE engine has no LMaster_ symbols
+        let latin = String::from_utf8_lossy(&lmsup);
+        assert!(
+            !latin.contains("LMaster_"),
+            "the NE engine has no LMaster_ strings"
+        );
+        // lmsup32.dll is a PE32 image (sig "PE") with the LMaster_* API
+        let elf32 = u32::from_le_bytes([
+            lmsup32[0x3c],
+            lmsup32[0x3c + 1],
+            lmsup32[0x3c + 2],
+            lmsup32[0x3c + 3],
+        ]) as usize;
+        assert_eq!(
+            &lmsup32[elf32..elf32 + 2],
+            b"PE",
+            "lmsup32.dll is a PE image"
+        );
+        let latin32 = String::from_utf8_lossy(&lmsup32);
+        for want in [
+            "LMaster_Begin",
+            "LMaster_End",
+            "LMaster_Lang",
+            "LMaster_Tran",
+        ] {
+            assert!(latin32.contains(want), "lmsup32.dll exports {want}");
+        }
+    }
 
     #[test]
     fn kod_parses_raw_and_hex_values() {

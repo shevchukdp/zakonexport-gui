@@ -1224,6 +1224,64 @@ pub fn main_cli() {
                         );
                     }
                 }
+                // v0.22.0: the u16 word/predicate table fingerprints
+                if let Some(w) = &idx.word_table {
+                    let last = w.last_offset().unwrap_or(0);
+                    let i16 = w.records.len().saturating_sub(w.offset_like_count() as usize);
+                    let ffa = w.kind_fa_count();
+                    let boundary = w.boundary().unwrap_or(0);
+                    let base = w.base;
+                    let count = w.count;
+                    let olike = w.offset_like_count();
+                    println!(
+                        "u16 word-таблиця @0x{base:x} (v0.22.0): {count} \
+                         records — {olike} offset-like (останній 0x{last:x}) + \
+                         {i16} i16 · 0xFFFA={ffa} · boundary=0x{boundary:x}",
+                    );
+                }
+                if let Some(p) = &idx.pred_table {
+                    let first = p.offsets.first().copied().unwrap_or(0);
+                    let pre = p
+                        .offsets
+                        .get(p.offsets.len().saturating_sub(2))
+                        .copied()
+                        .unwrap_or(0);
+                    let n = p.offset_count();
+                    let base = p.base;
+                    let sent = p.sentinel;
+                    let recs = p
+                        .record_sample
+                        .iter()
+                        .take(16)
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<String>>()
+                        .join(" ");
+                    println!(
+                        "u16 pred-таблиця @0x{base:x} (v0.22.0): {n} \
+                         offset-ів (0x{first:x}..0x{pre:x}) + sentinel \
+                         0x{sent:x} · records @хвіст: {recs}",
+                    );
+                }
+                if let Some(w) = &idx.rus_word_table {
+                    println!(
+                        "u16 word-таблиця (rus) @0x{:x}: {} records — {} \
+                         offset-like + 0xFFFA={} · boundary=0x{boundary:x}",
+                        w.base,
+                        w.count,
+                        w.offset_like_count(),
+                        w.kind_fa_count(),
+                        boundary = w.boundary().unwrap_or(0),
+                    );
+                }
+                if let Some(p) = &idx.rus_pred_table {
+                    println!(
+                        "u16 pred-таблиця (rus) @0x{:x}: {} offset-ів + \
+                         sentinel 0x{sent:x}",
+                        p.base,
+                        p.offset_count(),
+                        sent = p.sentinel,
+                    );
+                }
                 if let Some(u) = &idx.use_flags {
                     println!(
                         "{}: {} Б (body {} Б, {} — usage-прапорці \
@@ -1306,6 +1364,8 @@ pub fn main_cli() {
                  (14421 record-ів); v0.21.0: 16-slot .m-таблиця (slot5 = u16 predicate, \
                  slot11 = u16 word) + tail N-секція .m (N=3 ukr/N=4 rus) + trident \
                  dump <файл> [офс] [довжина]. \
+                 v0.22.0: структурний декод u16 word/predicate-таблиць (254/256 \
+                 records, 0xFFFA-маркери, sentinel 0xCECA, fingerprint у trident). \
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

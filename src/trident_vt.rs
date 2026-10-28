@@ -120,6 +120,30 @@
 //! engine's **write-mode** update caches (`lmC.use` opened 'W', the
 //! 204-byte `FUN_10011e10` form) and `.uvt` opens 'W' only — both
 //! reserved/never-written in this read-only base.
+//!
+//! ## v0.22.0: the u16 word/predicate tables, structural decode
+//!
+//! The two tables the join core consumes are structurally decoded
+//! (`VmWordTable` / `VmPredicateTable`):
+//!
+//! - the **word table** (slot 11) is `[u16 count][count u16
+//!   records @base+2]` — the count is the dictionary word count
+//!   (254 ukr / 256 rus). The first ~half of the records are small
+//!   ascending "offset-like" values (126 ukr / 128 rus, step 2),
+//!   the second half are i16-negative values carrying the `0xFFFA`
+//!   kind markers (61 ukr / 64 rus) and a final boundary record
+//!   (0x8000 ukr / 0x7F00 rus);
+//! - the **predicate table** (slot 5) is `[u16 offsets ×
+//!   160/168][0xCECA sentinel][packed u8-op/u16-arg records]` —
+//!   the offset run is non-strictly ascending and ends at the same
+//!   `0xCECA` sentinel in both languages; the record region after
+//!   the sentinel is the packed chain `FUN_10015cd0` walks.
+//!
+//! `TridentIndex` carries all four tables (ukr/rus) and the CLI
+//! `trident` verb prints their fingerprints (sizes + kind
+//! distributions). The semantic walk of the i16/predicate chains
+//! (word → u16 word-idx → doc-ids) is the next step (the v0.23.0
+//! doc-number join).
 
 /// The 64-byte header common to `.vt` and `.m` files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,9 +353,143 @@ impl VmHeader {
 
     /// Slot 11 — the u16 word table offset (0x37CB ukr / 0x3001 rus;
     /// the `ctx+0x30` table). The section layout is `[u16 count]` +
-    /// `count` relative u16 offsets (count 0xFE ukr / 0x100 rus).
+    /// `count` u16 records (count 0xFE=254 ukr / 0x100=256 rus —
+    /// the dictionary word count; v0.22.0 decode).
     pub fn word_off(&self) -> Option<u32> {
         self.table.get(11).copied()
+    }
+}
+
+/// The `.m` u16 word table (slot 11, v0.22.0 structural decode):
+/// `[u16 count][count u16 records @base+2]`.
+///
+/// Empirical findings (both real files):
+/// - the count is the dictionary word count (254 ukr / 256 rus);
+/// - the first ~half of the records (126 ukr / 128 rus) are small
+///   ascending "offset-like" values (0x0100+2i ukr, 0x0102+2i rus);
+/// - the second half are i16-negative values (high byte 0xFF) with
+///   the `0xFFFA` kind markers (61 ukr / 64 rus) and a final
+///   boundary record (0x8000 ukr / 0x7F00 rus).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmWordTable {
+    /// The section start (slot 11): 0x37CB ukr / 0x3001 rus.
+    pub base: u32,
+    /// The u16 record count (@base): 254 ukr / 256 rus.
+    pub count: u16,
+    /// The u16 records (@base+2, `count` of them).
+    pub records: Vec<u16>,
+}
+
+impl VmWordTable {
+    /// Parse the word-table section (the full section must be in
+    /// range; a truncated section yields `None`).
+    pub fn parse(bytes: &[u8], base: u32) -> Option<Self> {
+        let b = base as usize;
+        if b + 2 > bytes.len() {
+            return None;
+        }
+        let count = u16::from_le_bytes([bytes[b], bytes[b + 1]]);
+        let end = b + 2 + count as usize * 2;
+        if end > bytes.len() {
+            return None;
+        }
+        let records = (0..count as usize)
+            .map(|i| {
+                u16::from_le_bytes([bytes[b + 2 + 2 * i], bytes[b + 3 + 2 * i]])
+            })
+            .collect();
+        Some(VmWordTable {
+            base,
+            count,
+            records,
+        })
+    }
+
+    /// The count of the small "offset-like" records (< 0x8000): 126
+    /// ukr / 128 rus (the first half of the table).
+    pub fn offset_like_count(&self) -> u32 {
+        self.records.iter().filter(|v| **v < 0x8000).count() as u32
+    }
+
+    /// The last offset-like record (0x01FA ukr / the rus analogue).
+    pub fn last_offset(&self) -> Option<u16> {
+        self.records
+            .iter()
+            .copied()
+            .take_while(|v| *v < 0x8000)
+            .last()
+    }
+
+    /// The `0xFFFA` kind-marker count (61 ukr / 64 rus).
+    pub fn kind_fa_count(&self) -> u32 {
+        self.records.iter().filter(|&&v| v == 0xFFFA).count() as u32
+    }
+
+    /// The final boundary record (0x8000 ukr / 0x7F00 rus).
+    pub fn boundary(&self) -> Option<u16> {
+        self.records.last().copied()
+    }
+}
+
+/// The `.m` u16 predicate table (slot 5, v0.22.0 structural decode):
+/// `[u16 offsets × N][0xCECA sentinel][packed u8-op/u16-arg records]`.
+///
+/// Empirical findings (both real files): the offset run is
+/// non-strictly ascending and ends at the `0xCECA` sentinel (160
+/// offsets + sentinel ukr, 168 + sentinel rus); the record region
+/// after the sentinel is the packed predicate chain
+/// `FUN_10015cd0` walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmPredicateTable {
+    /// The section start (slot 5): 0x206D ukr / 0x1ACF rus.
+    pub base: u32,
+    /// The ascending u16 offsets (the sentinel included as the last
+    /// entry: 161 ukr / 169 rus).
+    pub offsets: Vec<u16>,
+    /// The last offset of the run — the `0xCECA` sentinel in both
+    /// real files.
+    pub sentinel: u16,
+    /// The first 64 bytes of the record region (after the sentinel).
+    pub record_sample: Vec<u8>,
+}
+
+impl VmPredicateTable {
+    /// Parse the predicate table: walk the non-strictly-ascending u16
+    /// run from `base` (it ends at the 0xCECA sentinel, or the first
+    /// descent); take 64 record bytes after it.
+    pub fn parse(bytes: &[u8], base: u32) -> Option<Self> {
+        let b = base as usize;
+        if b + 8 > bytes.len() {
+            return None;
+        }
+        let mut offsets = Vec::new();
+        let mut p = b;
+        let mut last = 0u16;
+        while p + 2 <= bytes.len() {
+            let u = u16::from_le_bytes([bytes[p], bytes[p + 1]]);
+            if !offsets.is_empty() && u < last {
+                break; // the run ended (the sentinel was the last)
+            }
+            offsets.push(u);
+            last = u;
+            p += 2;
+        }
+        if offsets.len() < 4 {
+            return None;
+        }
+        let sentinel = *offsets.last().unwrap();
+        let record_sample = bytes[p..(p + 64).min(bytes.len())].to_vec();
+        Some(VmPredicateTable {
+            base,
+            offsets,
+            sentinel,
+            record_sample,
+        })
+    }
+
+    /// The offset count excluding the sentinel (160 ukr / 168 rus).
+    pub fn offset_count(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
     }
 }
 
@@ -736,6 +894,88 @@ mod tests {
             })
             .collect();
         assert_eq!(first, vec![0x013E, 0x0154, 0x0164, 0x0170]);
+    }
+
+    #[test]
+    fn word_table_parses_the_real_lmur_m() {
+        let Some(m) = real(r"C:\Zakon.Local\Baza\SOFT\lmur.m") else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let w = VmWordTable::parse(&m, 0x37CB).expect("ukr word table");
+        assert_eq!(w.count, 0xFE, "the ukr dictionary word count");
+        assert_eq!(w.records.len(), 254);
+        // the first half: ascending offset-like records (step 2)
+        assert_eq!(
+            &w.records[..8],
+            &[0x0100, 0x0102, 0x0104, 0x0106, 0x0108, 0x010A, 0x010C, 0x010E]
+        );
+        assert_eq!(w.offset_like_count(), 126, "the offset-like half");
+        assert_eq!(w.last_offset(), Some(0x01FA));
+        // the i16 half: the 0xFFFA kind markers + the boundary record
+        assert_eq!(w.kind_fa_count(), 61);
+        assert_eq!(w.boundary(), Some(0x8000));
+    }
+
+    #[test]
+    fn word_table_parses_the_real_lmru_m() {
+        let Some(m) = real(r"C:\Zakon.Local\Baza\SOFT\lmru.m") else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let w = VmWordTable::parse(&m, 0x3001).expect("rus word table");
+        assert_eq!(w.count, 0x100, "the rus dictionary word count");
+        assert_eq!(
+            &w.records[..8],
+            &[0x0102, 0x0104, 0x0106, 0x0108, 0x010A, 0x010C, 0x010E, 0x0110]
+        );
+        assert_eq!(w.offset_like_count(), 128, "the rus split is even");
+        assert_eq!(w.kind_fa_count(), 64);
+        assert_eq!(w.boundary(), Some(0x7F00));
+    }
+
+    #[test]
+    fn pred_table_parses_the_real_lmur_m() {
+        let Some(m) = real(r"C:\Zakon.Local\Baza\SOFT\lmur.m") else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let p = VmPredicateTable::parse(&m, 0x206D).expect("ukr predicate");
+        assert_eq!(p.offsets.len(), 161, "160 offsets + the sentinel");
+        assert_eq!(
+            &p.offsets[..8],
+            &[0x013E, 0x0154, 0x0164, 0x0170, 0x0173, 0x0177, 0x017B, 0x017F]
+        );
+        assert_eq!(p.sentinel, 0xCECA, "the run-ending sentinel");
+        assert_eq!(p.offset_count(), 160);
+        assert_eq!(p.record_sample[0], 0x16, "the first packed record byte");
+    }
+
+    #[test]
+    fn pred_table_parses_the_real_lmru_m() {
+        let Some(m) = real(r"C:\Zakon.Local\Baza\SOFT\lmru.m") else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let p = VmPredicateTable::parse(&m, 0x1ACF).expect("rus predicate");
+        assert_eq!(p.offsets.len(), 169, "168 offsets + the sentinel");
+        assert_eq!(
+            &p.offsets[..8],
+            &[0x014E, 0x0164, 0x016D, 0x0173, 0x0189, 0x019B, 0x01A7, 0x01AA]
+        );
+        assert_eq!(p.sentinel, 0xCECA, "the same sentinel in rus");
+        assert_eq!(p.offset_count(), 168);
+    }
+
+    #[test]
+    fn u16_tables_yield_none_on_truncated_buffers() {
+        // the word count overruns the buffer (count=10, 2 records fit)
+        let mut b = vec![10u8, 0u8];
+        b.extend_from_slice(&[0u8; 4]);
+        assert!(VmWordTable::parse(&b, 0).is_none());
+        assert!(VmWordTable::parse(&[0u8; 1], 0).is_none());
+        // the predicate walk needs at least 8 bytes
+        assert!(VmPredicateTable::parse(&[0u8; 4], 0).is_none());
     }
 
     #[test]

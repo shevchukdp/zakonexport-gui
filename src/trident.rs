@@ -537,6 +537,17 @@ pub struct TridentIndex {
     pub rus_vt_stream: Option<crate::trident_vt::VtRecordStream>,
     /// the Russian `.m` metadata header (`lmru.m`, v0.20.0)
     pub rus_vm_header: Option<crate::trident_vt::VmHeader>,
+    /// the u16 word table (`.m` slot 11, v0.22.0 structural decode:
+    /// `[u16 count][count u16 records]`) — `None` when `lmur.m` is
+    /// absent or the section is truncated
+    pub word_table: Option<crate::trident_vt::VmWordTable>,
+    /// the u16 predicate table (`.m` slot 5, v0.22.0: the ascending
+    /// offset run + the 0xCECA sentinel + the packed record region)
+    pub pred_table: Option<crate::trident_vt::VmPredicateTable>,
+    /// the Russian u16 word table (`lmru.m` slot 11, v0.22.0)
+    pub rus_word_table: Option<crate::trident_vt::VmWordTable>,
+    /// the Russian u16 predicate table (`lmru.m` slot 5, v0.22.0)
+    pub rus_pred_table: Option<crate::trident_vt::VmPredicateTable>,
     /// the `lmu.use` usage-flags file (v0.20.0; the body is all zeros in
     /// this base — the 2005-era index does not enable the flags)
     pub use_flags: Option<crate::trident_vt::UseFile>,
@@ -613,16 +624,45 @@ impl TridentIndex {
         let graph = read("lmu.g").as_deref().and_then(crate::g_graph::GGraph::parse);
         // the exact `.vt` record stream + `.m` metadata header (v0.19.0)
         let vt_stream = crate::trident_vt::VtRecordStream::parse(&vt);
-        let vm_header = read("lmur.m")
+        // the u16 tables now need the `.m` bytes twice (header + the
+        // section parses) — hold them
+        let m_bytes = read("lmur.m");
+        let vm_header = m_bytes
             .as_deref()
             .and_then(crate::trident_vt::VmHeader::parse);
+        // v0.22.0: the u16 word/predicate tables (the `.m` slots 11/5)
+        let word_table = m_bytes.as_deref().and_then(|m| {
+            vm_header
+                .as_ref()
+                .and_then(|h| h.word_off())
+                .and_then(|off| crate::trident_vt::VmWordTable::parse(m, off))
+        });
+        let pred_table = m_bytes.as_deref().and_then(|m| {
+            vm_header
+                .as_ref()
+                .and_then(|h| h.pred_off())
+                .and_then(|off| crate::trident_vt::VmPredicateTable::parse(m, off))
+        });
         // the Russian streams + the usage-flags file (v0.20.0)
         let rus_vt_stream = read("lmru.vt").as_deref().and_then(
             crate::trident_vt::VtRecordStream::parse,
         );
-        let rus_vm_header = read("lmru.m")
+        let ru_bytes = read("lmru.m");
+        let rus_vm_header = ru_bytes
             .as_deref()
             .and_then(crate::trident_vt::VmHeader::parse);
+        let rus_word_table = ru_bytes.as_deref().and_then(|m| {
+            rus_vm_header
+                .as_ref()
+                .and_then(|h| h.word_off())
+                .and_then(|off| crate::trident_vt::VmWordTable::parse(m, off))
+        });
+        let rus_pred_table = ru_bytes.as_deref().and_then(|m| {
+            rus_vm_header
+                .as_ref()
+                .and_then(|h| h.pred_off())
+                .and_then(|off| crate::trident_vt::VmPredicateTable::parse(m, off))
+        });
         let use_flags = read("lmu.use")
             .as_deref()
             .and_then(crate::trident_vt::UseFile::parse);
@@ -647,8 +687,12 @@ impl TridentIndex {
             graph,
             vt_stream,
             vm_header,
+            word_table,
+            pred_table,
             rus_vt_stream,
             rus_vm_header,
+            rus_word_table,
+            rus_pred_table,
             use_flags,
             inventory,
         })
@@ -1150,8 +1194,12 @@ mod tests {
             graph: None,
             vt_stream: None,
             vm_header: None,
+            word_table: None,
+            pred_table: None,
             rus_vt_stream: None,
             rus_vm_header: None,
+            rus_word_table: None,
+            rus_pred_table: None,
             use_flags: None,
             inventory: Vec::new(),
         };
@@ -1199,6 +1247,39 @@ mod tests {
         assert!(
             idx.use_flags.as_ref().unwrap().body_is_zero(),
             "the usage flags are not enabled in this base"
+        );
+        // v0.22.0: the u16 word/predicate tables (the `.m` slots 11/5)
+        assert!(idx.word_table.is_some(), "the word table should parse");
+        assert!(
+            idx.pred_table.is_some(),
+            "the predicate table should parse"
+        );
+        assert!(idx.rus_word_table.is_some(), "the rus word table");
+        assert!(idx.rus_pred_table.is_some(), "the rus predicate table");
+        assert_eq!(
+            idx.word_table.as_ref().unwrap().count,
+            0xFE,
+            "the ukr dictionary word count"
+        );
+        assert_eq!(
+            idx.word_table.as_ref().unwrap().boundary(),
+            Some(0x8000),
+            "the ukr boundary record"
+        );
+        assert_eq!(
+            idx.rus_word_table.as_ref().unwrap().count,
+            0x100,
+            "the rus dictionary word count"
+        );
+        assert_eq!(
+            idx.rus_word_table.as_ref().unwrap().boundary(),
+            Some(0x7F00),
+            "the rus boundary record"
+        );
+        assert_eq!(
+            idx.pred_table.as_ref().unwrap().sentinel,
+            0xCECA,
+            "the predicate sentinel (both languages)"
         );
     }
 

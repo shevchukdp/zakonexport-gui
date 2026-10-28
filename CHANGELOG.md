@@ -104,6 +104,70 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.22.0 — 2026-10-28
+
+### UK
+- **U16 word-таблиця структурно декодована** (нова `VmWordTable`,
+  `.m` slot 11): секція = `[u16 count][count u16 records @base+2]`.
+  Count = **кількість слів словника** (254 ukr / 256 rus). Перша
+  половина записів (126/128) — малі уростальні offset-значення
+  (step 2, 0x0100..0x01FA ukr / 0x0102.. rus), друга половина —
+  i16-від'ємні значення (high byte 0xFF) з **kind-маркерами 0xFFFA
+  (61 ukr / 64 rus)** та фінальним boundary-записом (**0x8000 ukr /
+  0x7F00 rus**). Це і є ті «kind-byte records 0xFA/0x33» з старого
+  blocked item: 0xFA присутній як значення запису 0xFFFA, а 0x33 —
+  один байт у потоку `.m` (пошук — далі).
+- **U16 predicate-таблиця структурно декодована** (нова
+  `VmPredicateTable`, `.m` slot 5): секція = `[u16 offsets ×
+  160/168][sentinel 0xCECA][packed u8-op/u16-arg records]`.
+  Offset-run уростає (non-strictly) і **завершується sentinel
+  0xCECA в ОБОХ мовах** — міжмовний інваріант. Після sentinel —
+  packed-рекорди (у ukr перший байт = 0x16), які ходить
+  `FUN_10015cd0`; семантика ланцюжка — наступний RE-крок.
+- **`TridentIndex`** несе всі 4 таблиці (ukr/rus): `word_table`,
+  `pred_table`, `rus_word_table`, `rus_pred_table`.
+- **CLI `trident`** — нові fingerprint-рядки: `u16 word-таблиця
+  @0x37cb: 254 records — 126 offset-like (останній 0x1fa) + 128 i16 ·
+  0xFFFA=61 · boundary=0x8000`, `u16 pred-таблиця @0x206d: 160
+  offset-ів (0x13e..0x2316) + sentinel 0xceca · records @хвіст: 16 cb
+  1a cb …` (+ rus-аналоги).
+- **137 юніт-тестів** (нові: реальні word/pred-таблиці обох мов —
+  перші 8 offset-ів, kind-розподіли, sentinel, truncation). Guitest
+  baseline `rows=430` без змін. Версія **0.21.0 → 0.22.0**.
+
+### EN
+- **The u16 word table structurally decoded** (new `VmWordTable`,
+  `.m` slot 11): the section is `[u16 count][count u16 records
+  @base+2]`. The count is the **dictionary word count** (254 ukr /
+  256 rus). The first half of the records (126/128) are small
+  ascending offset-like values (step 2, 0x0100..0x01FA ukr /
+  0x0102.. rus), the second half are i16-negative values (high byte
+  0xFF) with the **0xFFFA kind markers (61 ukr / 64 rus)** and a
+  final boundary record (**0x8000 ukr / 0x7F00 rus**). These are
+  the "kind-byte records 0xFA/0x33" of the old blocked item: 0xFA
+  is present as the 0xFFFA record value, and 0x33 is a single
+  stream byte in the `.m` (its hunt comes next).
+- **The u16 predicate table structurally decoded** (new
+  `VmPredicateTable`, `.m` slot 5): the section is `[u16 offsets ×
+  160/168][0xCECA sentinel][packed u8-op/u16-arg records]`. The
+  offset run is non-strictly ascending and **ends at the 0xCECA
+  sentinel in BOTH languages** — a cross-language invariant. After
+  the sentinel sit the packed records (ukr first byte = 0x16) that
+  `FUN_10015cd0` walks; the chain semantics are the next RE step.
+- **`TridentIndex`** carries all four tables (ukr/rus):
+  `word_table`, `pred_table`, `rus_word_table`, `rus_pred_table`.
+- **CLI `trident`** — new fingerprint lines: `u16 word-таблиця
+  @0x37cb: 254 records — 126 offset-like (останній 0x1fa) + 128 i16
+  · 0xFFFA=61 · boundary=0x8000`, `u16 pred-таблиця @0x206d: 160
+  offset-ів (0x13e..0x2316) + sentinel 0xceca · records @хвіст: 16
+  cb 1a cb …` (+ the rus analogues).
+- **137 unit tests** (new: the real word/predicate tables of both
+  languages — the first 8 offsets, the kind distributions, the
+  sentinel, the truncation cases). The guitest baseline `rows=430`
+  is unchanged. Version **0.21.0 → 0.22.0**.
+
+---
+
 ## v0.21.0 — 2026-10-28
 
 ### UK

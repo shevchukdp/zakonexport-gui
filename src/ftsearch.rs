@@ -275,6 +275,105 @@ pub fn ft_search(baza: &Path, term: &str) -> FtResult {
     }
 }
 
+/// A per-term oracle agreement record: the native exact-join doc count vs
+/// the oracle's distinct-file count, and their agreement in 0.0..=1.0.
+///
+/// The native u16 doc-ids and the oracle's `.mb` files are different
+/// identifier spaces (the 2005 docnum space vs the current file set), so the
+/// agreement is a *count* agreement (`min/max` of the two document counts),
+/// not a set intersection. Both counts zero = vacuous agreement (1.0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OracleTerm {
+    /// the query term
+    pub term: String,
+    /// distinct native u16 doc-ids from the exact join for this term
+    pub tsearch_docs: usize,
+    /// distinct oracle `.mb` files containing the term (lower + title case)
+    pub oracle_files: usize,
+    /// per-term count agreement in 0.0..=1.0 (1.0 when both are zero)
+    pub agreement: f64,
+}
+
+impl OracleTerm {
+    /// The count agreement: `min/max` of the two document counts; 1.0 when
+    /// both are zero (vacuous), 0.0 when exactly one is zero.
+    pub fn agreement(t_docs: usize, o_files: usize) -> f64 {
+        match (t_docs, o_files) {
+            (0, 0) => 1.0,
+            (0, _) | (_, 0) => 0.0,
+            (a, b) => {
+                let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+                lo as f64 / hi as f64
+            }
+        }
+    }
+}
+
+/// The per-term oracle counts for a set of terms, produced by a **single
+/// pass** over the base's `.mb` files (each file is read once; every term is
+/// matched within that read). This keeps a 20-query corpus at one full scan
+/// instead of twenty.
+#[derive(Debug, Clone, Default)]
+pub struct OracleCounts {
+    /// per term: the distinct file count containing it (in the same order as
+    /// the input `terms`)
+    pub per_term: Vec<(String, usize)>,
+    /// how many `.mb` files were scanned
+    pub files_scanned: usize,
+}
+
+/// Count, for each `terms[i]`, how many distinct `.mb` files of the base
+/// contain the term (lowercase + title-case variants) — in one pass over the
+/// files. The distinct-file count is the oracle's "document count" for the
+/// term, used by the `--oracle` cross-check in `tsearch`.
+pub fn oracle_multi(baza: &Path, terms: &[&str]) -> OracleCounts {
+    let files = collect_mb_files(baza);
+    // encode each term's variants once (lower + title), dropping empties
+    let variants: Vec<Vec<Vec<u8>>> = terms
+        .iter()
+        .map(|t| {
+            let mut vs = Vec::new();
+            let (b, _, _) = encode_term(t, false);
+            if !b.is_empty() {
+                vs.push(b);
+            }
+            let (bt, _, _) = encode_term(t, true);
+            if !bt.is_empty() && !vs.contains(&bt) {
+                vs.push(bt);
+            }
+            vs
+        })
+        .collect();
+    // per-term distinct-file counters (a HashSet of the relative file paths)
+    let mut counters: Vec<std::collections::HashSet<PathBuf>> =
+        terms.iter().map(|_| std::collections::HashSet::new()).collect();
+    for f in &files {
+        let buf = match fs::read(f) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let rel = f
+            .strip_prefix(baza)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| f.clone());
+        for (ti, vs) in variants.iter().enumerate() {
+            // the term counts as present in this file if any variant hits
+            if vs.iter().any(|v| !v.is_empty() && !scan_offsets(&buf, v).is_empty()) {
+                counters[ti].insert(rel.clone());
+            }
+        }
+    }
+    let per_term = terms
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.to_string(), counters[i].len()))
+        .collect();
+    OracleCounts {
+        per_term,
+        files_scanned: files.len(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -375,6 +474,38 @@ mod tests {
             "non-overlapping starts reported"
         );
         assert!(scan_offsets(&[b'a'], b"ab").is_empty());
+    }
+
+    #[test]
+    fn oracle_term_agreement_classes() {
+        // vacuous: both empty = 1.0
+        assert_eq!(OracleTerm::agreement(0, 0), 1.0);
+        // one side empty = 0.0
+        assert_eq!(OracleTerm::agreement(5, 0), 0.0);
+        assert_eq!(OracleTerm::agreement(0, 5), 0.0);
+        // count agreement = min/max
+        assert_eq!(OracleTerm::agreement(10, 10), 1.0);
+        assert_eq!(OracleTerm::agreement(1, 10), 0.1);
+        assert!((OracleTerm::agreement(9, 10) - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn oracle_multi_counts_distinct_files_once() {
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !baza.join("text").is_dir() {
+            eprintln!("oracle multi test: skipped (no base)");
+            return;
+        }
+        let r = oracle_multi(baza, &["конституція"]);
+        assert_eq!(r.per_term.len(), 1);
+        assert_eq!(r.per_term[0].0, "конституція");
+        // the oracle reproduced ~222 hits across ~200 distinct files for this
+        // term; the distinct-file count is what the --oracle check uses
+        assert!(
+            r.per_term[0].1 > 0,
+            "конституція must occur in at least one .mb file"
+        );
+        assert!(r.files_scanned > 0);
     }
 
     #[test]

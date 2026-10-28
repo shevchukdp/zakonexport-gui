@@ -557,10 +557,14 @@ pub struct TridentIndex {
 /// The result of an experimental `tsearch`.
 #[derive(Debug, Clone, Default)]
 pub struct TridentResult {
-    /// native document ids read from `.vt` (experimental — the exact
-    /// per-word posting boundary decode is a roadmap item; as of v0.15.0 the
-    /// dictionary extraction is the general `[tag][word NUL][flag]` format)
+    /// native document ids read from `.vt` — the proportional
+    /// `posting_slice` **estimate** (v0.24.0: fallback only — filled when
+    /// the exact stem join found nothing for a matched term; labelled
+    /// «оцінка» in the CLI)
     pub docs: Vec<u32>,
+    /// true when `docs` is non-empty (it is only ever the proportional
+    /// fallback; the exact join evidence lives in `joined`)
+    pub docs_fallback: bool,
     /// the terms that were found in the dictionary
     pub matched: Vec<String>,
     /// the exact stem join hits (v0.19.0): `(Latin candidate, .vt record
@@ -760,6 +764,7 @@ impl TridentIndex {
 
         docs.sort();
         docs.dedup();
+        let docs_fallback = !docs.is_empty();
         let coverage = if total_chars == 0 {
             0.0
         } else {
@@ -767,12 +772,34 @@ impl TridentIndex {
         };
         TridentResult {
             docs,
+            docs_fallback,
             matched,
             joined,
             coverage,
             dict_size: self.dict_words.len(),
             vt_size: self.vt_u16.len(),
         }
+    }
+
+    /// The distinct u16 doc-ids contributed by the **exact** stem join for
+    /// one term (v0.24.0): the union of the matching `.vt` records' u16 word
+    /// sets, de-duplicated. This is the per-term native document count the
+    /// `--oracle` cross-check compares against the oracle's file count.
+    /// Empty when the term is not fully encodable or the `.vt` stream is
+    /// absent.
+    pub fn term_join_docs(&self, term: &str) -> Vec<u16> {
+        let mut set: std::collections::HashSet<u16> =
+            std::collections::HashSet::new();
+        for (_, _, u16s) in self.exact_postings(term) {
+            for v in u16s {
+                if v != 0 {
+                    set.insert(v);
+                }
+            }
+        }
+        let mut out: Vec<u16> = set.into_iter().collect();
+        out.sort_unstable();
+        out
     }
 
     /// Encode the query terms through the (now full) character table and
@@ -1206,9 +1233,12 @@ mod tests {
         let r = idx.search("а0"); // encodes to [0xA4, 0x30] — no match
         assert!(r.matched.is_empty());
         assert!(r.docs.is_empty());
+        assert!(!r.docs_fallback, "no fallback docs when nothing matched");
         let r = idx.search("са0"); // exact word
         assert_eq!(r.matched, vec!["са0".to_string()]);
         assert!(!r.docs.is_empty());
+        // no `.vt` stream here, so the docs are the proportional fallback
+        assert!(r.docs_fallback, "docs are the proportional fallback");
         assert_eq!(r.coverage, 1.0);
     }
 
@@ -1336,5 +1366,31 @@ mod tests {
         assert!(!r.joined.is_empty(), "search must report the join");
         // an unknown word finds nothing
         assert!(idx.exact_postings("zzzz").is_empty());
+    }
+
+    #[test]
+    fn term_join_docs_dedupes_and_drops_zero() {
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let idx = TridentIndex::open(baza).expect("index should load");
+        // «був» (BUV) yields a non-empty de-duplicated u16 doc-id set, all
+        // non-zero and sorted
+        let docs = idx.term_join_docs("був");
+        assert!(!docs.is_empty(), "BUV must yield doc-ids");
+        assert!(docs.iter().all(|d| *d != 0), "zero (a terminator) is dropped");
+        assert!(
+            docs.windows(2).all(|w| w[0] <= w[1]),
+            "the doc-id set is sorted"
+        );
+        assert_eq!(
+            docs.len(),
+            docs.iter().cloned().collect::<std::collections::HashSet<_>>().len(),
+            "no duplicates"
+        );
+        // an unknown word yields nothing
+        assert!(idx.term_join_docs("zzzz").is_empty());
     }
 }

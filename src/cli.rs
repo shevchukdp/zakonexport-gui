@@ -34,10 +34,12 @@ Usage:
           (SOFT\\ inventory — 16 files incl. windows.kod + lm.a, plus the
           decoded parts: kod codes, fold pairs, dict records, vt stream;
           search via tsearch — experimental)
-  zakonexport-cli tsearch <query>  experimental: search the base's native
+  zakonexport-cli tsearch <query> [--oracle]  search the base's native
           Trident index (SOFT\\lmu.voc + lmur.vt) — the legacy main app's
-          engine. The document numbers are the native 2005-era Trident ids
-          (the join to the current base docnums is in development)
+          engine. Document numbers are native 2005-era Trident u16 ids;
+          the doc-number join to the current base is probed (v0.23.0) and
+          the --oracle flag cross-checks the exact join against the
+          ftsearch oracle (per-term count agreement, v0.24.0)
   zakonexport-cli ftsearch <query>  full-text scan of the base's `.mb`
           document files (case-insensitive exact word — the legacy app's
           oracle mechanism); reports (file @ offset) hits like the oracle,
@@ -127,6 +129,9 @@ struct Options {
     single: bool,
     /// mark the query terms in the exported text (md/html/rtf/docx)
     hl: bool,
+    /// tsearch: cross-check the native exact join against the ftsearch
+    /// oracle (per-term count agreement)
+    oracle: bool,
 }
 
 fn parse_args() -> Options {
@@ -156,6 +161,7 @@ fn parse_args() -> Options {
         attach: false,
         single: false,
         hl: false,
+        oracle: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -271,6 +277,10 @@ fn parse_args() -> Options {
             "--list" if next(i).is_some() => {
                 o.listfile = Some(PathBuf::from(next(i).unwrap()));
                 i += 2;
+            }
+            "--oracle" => {
+                o.oracle = true;
+                i += 1;
             }
             other => {
                 pos.push(other.to_string());
@@ -1368,17 +1378,25 @@ pub fn main_cli() {
                  records, 0xFFFA-маркери, sentinel 0xCECA, fingerprint у trident). \
                  v0.23.0: join native→docnum (trident_join::DocJoin::probe — \
                  u16-простір 2005 vs поточні docnums; openable-субмножина в tsearch). \
+                 v0.24.0: tsearch v2 — точний join як primary, пропорційний \\
+                 slice як позначений fallback (оцінка) + --oracle (кросчек \\
+                 ftsearch, збіг по термінах). \\
                  Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())
         })(),
         "tsearch" => (|| {
-            // Experimental native-index search: encode the query through the
-            // LmCode character table, look the terms up in the lmu.voc
-            // dictionary, read posting slices from lmur.vt. The document
-            // numbers are the native Trident ids of the 2005-era index;
-            // v0.23.0 probes the join to the current base docnums
-            // (trident_join::DocJoin) and reports the openable subset.
+            // Native-index search: encode the query through the LmCode
+            // character table, look the terms up in the lmu.voc dictionary,
+            // read posting slices from lmur.vt. The document numbers are the
+            // native Trident ids of the 2005-era index; v0.23.0 probes the
+            // join to the current base docnums (trident_join::DocJoin) and
+            // reports the openable subset. v0.24.0 (tsearch v2): the exact
+            // stem join is the primary evidence, the proportional
+            // posting-slice is a labelled fallback («оцінка»), and the
+            // --oracle flag cross-checks each term against the ftsearch
+            // oracle (per-term count agreement; «оракельно підтверджено»
+            // when the agreement >= 0.9).
             require_baza(&o)?;
             let q = get_query(&o)?;
             if q.is_empty() {
@@ -1395,7 +1413,42 @@ pub fn main_cli() {
             };
             let r = idx.search(&q);
             let pct = (r.coverage * 100.0).round() as u32;
-            println!("Trident tsearch (експеримент): «{q}»");
+            // v0.24.0: the --oracle cross-check — per-term native exact-join
+            // doc count vs the oracle's distinct-file count (a *count*
+            // agreement: the u16 doc-ids and the .mb files are different
+            // identifier spaces). The overall agreement drives the verb
+            // label: >= 0.9 -> "оракельно підтверджено", else the term stays
+            // "експеримент (пошук)".
+            let terms: Vec<&str> = q.split_whitespace().collect();
+            let oracle: Option<crate::ftsearch::OracleCounts> = if o.oracle {
+                Some(crate::ftsearch::oracle_multi(&o.baza, &terms))
+            } else {
+                None
+            };
+            let label: String = match &oracle {
+                Some(oc) => {
+                    let agree_sum: f64 = oc
+                        .per_term
+                        .iter()
+                        .map(|(t, ofiles)| {
+                            let tdocs = idx.term_join_docs(t).len();
+                            crate::ftsearch::OracleTerm::agreement(tdocs, *ofiles)
+                        })
+                        .sum();
+                    let overall = if oc.per_term.is_empty() {
+                        1.0
+                    } else {
+                        agree_sum / oc.per_term.len() as f64
+                    };
+                    if overall >= 0.9 {
+                        "оракельно підтверджено".to_string()
+                    } else {
+                        "експеримент (пошук)".to_string()
+                    }
+                }
+                None => "експеримент (пошук)".to_string(),
+            };
+            println!("Trident tsearch ({label}): «{q}»");
             println!(
                 "  словник: {} слів · vt-потік: {} u16 · покриття знаків: {}% · \
                  знайдено термінів: {}",
@@ -1481,6 +1534,40 @@ pub fn main_cli() {
                     );
                 }
             }
+            // v0.24.0: the --oracle cross-check output — per-term
+            // `tsearch ∩ ftsearch` count agreement (native exact-join doc
+            // count vs the oracle's distinct-file count)
+            if let Some(oc) = &oracle {
+                // per-term (t_docs, o_files, agree), aligned with `terms`
+                let rows: Vec<(usize, usize, f64)> = oc
+                    .per_term
+                    .iter()
+                    .map(|(t, ofiles)| {
+                        let tdocs = idx.term_join_docs(t).len();
+                        (
+                            tdocs,
+                            *ofiles,
+                            crate::ftsearch::OracleTerm::agreement(tdocs, *ofiles),
+                        )
+                    })
+                    .collect();
+                println!(
+                    "  oracle (v0.24.0, ftsearch .mb-скан): {} файлів · {}",
+                    oc.files_scanned,
+                    oc.per_term
+                        .iter()
+                        .map(|(t, n)| format!("«{t}»={n} док-ів"))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                );
+                for (t, row) in terms.iter().zip(&rows) {
+                    let (tdocs, ofiles, agree) = row;
+                    println!(
+                        "    «{t}»: tsearch {tdocs} док-ів · oracle {ofiles} \
+                         док-ів · збіг {agree:.2}"
+                    );
+                }
+            }
             if r.docs.is_empty() {
                 println!(
                     "  результат: 0 документів (точні word→postings кордони; \
@@ -1495,9 +1582,13 @@ pub fn main_cli() {
                     .map(|d| d.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
+                // v0.24.0: `docs` is only ever the proportional posting-slice
+                // fallback (the exact join found nothing) — label it so no
+                // heuristic number is presented as exact
                 println!(
-                    "  результат: {} Trident-документів (native IDs 2005-індексу, \
-                     показано {}):",
+                    "  результат (оцінка, пропорційний posting-slice — точний \
+                     join не розв'язав термін): {} Trident-документів \
+                     (native IDs 2005-індексу, показано {}):",
                     r.docs.len(),
                     shown.len()
                 );

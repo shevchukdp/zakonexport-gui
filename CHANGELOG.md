@@ -16,6 +16,71 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.28.0 — 2026-10-28
+
+### UK
+- **B-tree byte-VM core `FUN_100019f0` — part 1 (roadmap v0.29.0).**
+  Новий `src/trident_vm.rs` — скелет VM, що проганяє payload записів `.vt`:
+  - `VmCtx { instance, depth, off_counter, counter, flags, out, fold }`
+    (стан `FUN_100019f0`) + `VmScan { key, next_off, counter }` +
+    **`run_scan(payload) -> VmScan`** (key-байти `≤0x3F` → casefold +
+    емісія + лічильник; op-байти `>0x3F` → dispatch).
+  - **Part-1 ops**: key-casefold (`≤0x3F`), `0x40`, `0x41` (через
+    `FUN_100018b0`-loop — advance), `0x42`/`0x49`/`0xFF` (flush/стоп),
+    `0x45` (instance з u16-операнда, advance 3), `0x48` (скидання
+    instance, advance 1). **Part-2 ops** (`0x43` descent, `0x44`
+    case-swap, `0x46`/`0x47` affix, `0x4A`/`0x4B`/`0x4C`) —
+    advance-and-continue (node-pool — roadmap v0.30.0).
+  - casefold-таблиця як fixture `CaseFold = [u8;128]`
+    (`IDENTITY_FOLD = b & 0x3F` — скелет працює без глобалів DLL);
+    `VM_OPS` — 15-рядковий op-каталог (UA+EN + part-маркер),
+    `vm_op_catalog_size` / `vm_part1_op_count`.
+- **CLI `trident`**: новий рядок `vm-опкоди (v0.28.0, FUN_100019f0
+  part-1): 15 op-code · part-1 7 (0x40/41/42/45/48/49/FF) · skeleton
+  trident_vm::run_scan` + usage + roadmap-сумарі.
+- **166 юніт-тестів** (нові 7: key fold/count, `0x45` instance, `0x48`
+  reset, terminating-ops, part-2 skip, op-каталог, real-stream run).
+- **DoD-метрика**: 14160-record `.vt` stream **працює без panic**;
+  counter≥1 rate = **0.715 (71.5%)** (записано) — нижче 90%-цілі
+  roadmap; дельта — part-2 node-pool (roadmap v0.30.0). Guitest baseline
+  `rows=430` без змін. Версія **0.27.0 → 0.28.0**.
+- Далі (v0.29.0 / roadmap v0.30.0): VM descent + node pool + affix ops
+  (`0x43`/`0x44`/`0x46`/`0x47`/`0x4A`/`0x4B`/`0x4C`).
+
+### EN
+- **The B-tree byte-VM core `FUN_100019f0` — part 1 (roadmap
+  v0.29.0).** New `src/trident_vm.rs` — the VM skeleton that runs `.vt`
+  record payloads:
+  - `VmCtx { instance, depth, off_counter, counter, flags, out, fold }`
+    (the `FUN_100019f0` state) + `VmScan { key, next_off, counter }` +
+    **`run_scan(payload) -> VmScan`** (key bytes `<=0x3F` → case-fold +
+    emit + count; op bytes `>0x3F` → dispatch).
+  - **Part-1 ops**: the key case-fold (`<=0x3F`), `0x40`, `0x41` (via
+    the `FUN_100018b0` loop — advance), `0x42`/`0x49`/`0xFF` (flush /
+    stop), `0x45` (instance from the u16 operand, advance 3), `0x48`
+    (reset the instance, advance 1). **Part-2 ops** (`0x43` descent,
+    `0x44` case-swap, `0x46`/`0x47` affixes, `0x4A`/`0x4B`/`0x4C`) are
+    advance-and-continue (the node pool is roadmap v0.30.0).
+  - the case-fold table as a `CaseFold = [u8;128]` fixture
+    (`IDENTITY_FOLD = b & 0x3F` — the skeleton runs without the DLL
+    globals); `VM_OPS` — a 15-row op catalog (UA+EN + the part marker),
+    `vm_op_catalog_size` / `vm_part1_op_count`.
+- **CLI `trident`**: a new `vm-опкоди (v0.28.0, FUN_100019f0 part-1):
+  15 op-code · part-1 7 (0x40/41/42/45/48/49/FF) · skeleton
+  trident_vm::run_scan` line + the usage + roadmap summary.
+- **166 unit tests** (7 new: the key fold/count, the `0x45` instance,
+  the `0x48` reset, the terminating ops, the part-2 skip, the op
+  catalog, the real-stream run).
+- **The DoD metric**: the 14160-record `.vt` stream **runs without
+  panic**; the counter≥1 rate = **0.715 (71.5 %)** (recorded) — below
+  the 90 % roadmap target; the gap is the part-2 node pool (roadmap
+  v0.30.0). The guitest baseline `rows=430` is unchanged. Version
+  **0.27.0 → 0.28.0**.
+- Next (v0.29.0 / roadmap v0.30.0): the VM descent + the node pool + the
+  affix ops (`0x43`/`0x44`/`0x46`/`0x47`/`0x4A`/`0x4B`/`0x4C`).
+
+---
+
 ## v0.27.0 — 2026-10-28
 
 ### UK

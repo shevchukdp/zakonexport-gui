@@ -25,6 +25,7 @@ pub mod trident;
 pub mod trident_join;
 pub mod trident_voc;
 pub mod trident_vt;
+pub mod trident_vm;
 pub mod update;
 pub mod writers;
 

@@ -35,6 +35,7 @@ Usage:
           decoded parts: kod codes, fold pairs, dict records, vt stream; .m section
           walker (v0.26.0: 16-slot classification + word-rows + 0x88 registry);
           predicate catalog (v0.27.0: FUN_100177d0 22 opcodes + evaluable subset);
+          byte-VM part-1 (v0.28.0: FUN_100019f0 run_scan, 7 part-1 ops);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -1145,6 +1146,15 @@ pub fn main_cli() {
                     crate::trident_vt::pred_catalog_size(),
                     crate::trident_vt::pred_evaluable_count()
                 );
+                // v0.28.0: the FUN_100019f0 byte-VM op catalog (roadmap
+                // v0.29.0) — the static op table + the part-1 skeleton
+                // dispatch size (the trident verb's catalog size)
+                println!(
+                    "vm-опкоди (v0.28.0, FUN_100019f0 part-1): {} op-code · part-1 \
+                     {} (0x40/41/42/45/48/49/FF) · skeleton trident_vm::run_scan",
+                    crate::trident_vm::vm_op_catalog_size(),
+                    crate::trident_vm::vm_part1_op_count()
+                );
                 // the exact .voc morphology tables (v0.17.0)
                 if let Some(m) = &idx.morphology {
                     let t = &m.table;
@@ -1481,7 +1491,9 @@ pub fn main_cli() {
                  .m-таблиці + 16B word-rows slot-0 + 0x88 registry + tiling-assert). \\\
                  v0.27.0: FUN_100177d0 predicate-каталог (22 opcodes, UA+EN) + \\\
                  evaluable-subset pred_evaluate (20/22; trident reports catalog size). \\\
-                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
+                  v0.28.0: FUN_100019f0 byte-VM part-1 (trident_vm — key-casefold loop + \\\
+                 part-1 ops 0x40/41/42/45/48/49/FF + run_scan; 14160-record .vt stream runs, counter>=1 rate recorded). \\\
+                Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())
         })(),

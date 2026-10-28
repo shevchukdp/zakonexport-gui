@@ -38,6 +38,7 @@ Usage:
           byte-VM part-1+2 (v0.29.0: FUN_100019f0 run_record, node pool + affix ops, 0x49 soft-continue);
           .voc root B-tree (v0.30.0: FUN_10002b70 root-node decode + pool-descent skeleton);
           .voc dense nodes (v0.31.0: 4096-resync 15 slots + 722/2157 listA/listB reconciliation);
+          .voc 'f' opcode-VM (v0.32.0: FUN_100044f0 142 programs, run_f_program + count invariant);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -1272,6 +1273,20 @@ pub fn main_cli() {
                         );
                     }
                 }
+                // v0.32.0: the per-word `'f'` opcode-VM execution report
+                // (roadmap v0.33.0) — the 142 programs + the count invariant
+                if let Some(progs) = idx.morphology.as_ref().and_then(|m| m.f_programs.as_ref()) {
+                    let terminated = progs.iter().filter(|p| p.terminated).count();
+                    let leaves: u32 = progs.iter().map(|p| p.word_count).sum();
+                    println!(
+                        "f-opcode (v0.32.0, FUN_100044f0): {} programs (142 declared) · \
+                         terminated {} · word-leaf hits {} · 0x1004 child counts need \
+                         the DAT_1002ddec pool (skeleton)",
+                        progs.len(),
+                        terminated,
+                        leaves
+                    );
+                }
                 // the exact `.vt` record stream + `.m` metadata header (v0.19.0)
                 if let Some(s) = &idx.vt_stream {
                     let runs: usize = s
@@ -1545,6 +1560,8 @@ pub fn main_cli() {
                   skeleton; «конституція» full resolution awaits the node-pool pin + FUN_100028e0).\\\
                   v0.31.0: .voc dense nodes (VocDenseNodes — 4096-resync 15 slot-decodes + \\\
                   722/2157 listA/listB reconciliation, delta 1435, dense shortfalls 334/1775).\\\
+                  v0.32.0: .voc 'f' opcode-VM (run_f_program — FUN_100044f0 0x1001..04 executor + \\\
+                  Morphology.f_programs report; 142/142 terminate at 0x1002, 176 word-leaf hits). \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

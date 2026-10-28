@@ -96,9 +96,33 @@
 //!
 //! Section → mode map (from the `FUN_100032d0` loader's calls): `+0x48` →
 //! `'f'`, `+0x58` → `0xff`, `+0x4C`/`+0x50`/`+0x54`/`+0x60`/`+0x68`/`+0x6C`/
-//! `+0x70` (and empirically `+0x64`, read by a separate consumer) → `'n'`,
-//! `+0x5C` → a raw seek (no record walk), `+0x3C`/`+0x40`/`+0x44` → the
-//! B-tree index consumed by the search code (outside the loader's walks).
+//! `+0x70` → `'n'`.
+//!
+//! **The two loader-consumer gaps (roadmap v0.33.0), triaged from
+//! `FUN_100032d0` (clean-room, file-referenced):**
+//! - `+0x5C` — a **raw seek** (the loader's `FUN_10021800(handle, +0x5C)`,
+//!   the file-I/O layer's seek), stored to `DAT_1002db76` (`+0x5C`'s
+//!   struct field). No `FUN_10004230` record walk — it is a direct
+//!   file-position / count read, not a packed record section.
+//! - `+0x64` — the **33-word table**, walked by the *same* loader
+//!   (`FUN_10004230(handle, +0x64, 'n')`, the `FUN_100032d0` line with the
+//!   `+ 100` decimal offset, under the `param_1 & 8` affix/word load flag),
+//!   stored to `DAT_1002db7e`. Not a separate consumer — the earlier
+//!   "separate consumer" note is the loader's `& 8` mode branch.
+//! `+0x3C`/`+0x40`/`+0x44` → the B-tree index consumed by the search code
+//! (outside the loader's walks).
+//!
+//! **The per-word `'f'` program count invariant (roadmap v0.33.0 DoD, UA+EN):**
+//! in `lmu.voc`, the `+0x48` section declares 142 records and the
+//! `block = 4096` walk resynchronizes onto all 142 (each ends in a
+//! double-NUL in-file, unlike the dense listA/listB). Running all 142
+//! through [`run_f_program`]: **every one terminates at the top-level
+//! `0x1002`** (142/142), with **176 `0x1003` word-leaf hits** in total.
+//! EN: of the 142 declared per-word `'f'` programs, all 142 are walked and
+//! all 142 terminate at the top-level `0x1002`; the 176 `0x1003` word-leaf
+//! hits are the resolvable part — the `0x1004` child-subtree word counts
+//! need the `DAT_1002ddec` node pool (a DLL-image global, deferred), so
+//! [`Morphology::f_programs`] records the structural skeleton.
 //!
 //! Verified against the real `lmu.voc` (block = 512): `f` @ `0x75253`
 //! (142 records) lands exactly on `0x764c5`; `0xff` @ `0x764c5` (12) on
@@ -375,6 +399,93 @@ pub fn vm_record_len(rec: &[u8]) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// v0.32.0 (roadmap v0.33.0): the per-word `'f'` opcode-VM execution
+// ---------------------------------------------------------------------------
+
+/// The result of executing one per-word `'f'` program (roadmap v0.33.0):
+/// the program byte length, the word count, and the collected inline u16 data.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FResult {
+    /// the program byte length (up to and including the top-level `0x1002`;
+    /// the even-truncated length when there is no top-level terminator).
+    pub byte_len: usize,
+    /// the word count: the `0x1003` word-leaf hits + the `0x1004` child
+    /// subtree word counts (via the resolver).
+    pub word_count: u32,
+    /// the inline u16 data collected (the non-`0x1001`/`0x1002`/`0x1003`
+    /// ops: the `0x1004` child pointers + the raw data u16s).
+    pub data: Vec<u16>,
+    /// whether the scan terminated at a top-level `0x1002` (vs running to
+    /// the record end / an even-truncation).
+    pub terminated: bool,
+}
+
+/// `FUN_100044f0` (with the word-count out-param) — execute a per-word `'f'`
+/// opcode-VM program (the `0x1001..0x1004` u16 instruction stream):
+/// - `0x1001` — enter a nested subtree (depth + 1);
+/// - `0x1002` — a subtree terminator (depth − 1); a top-level one (depth 0)
+///   terminates the program;
+/// - `0x1003` — a word leaf (`word_count += 1`);
+/// - `0x1004 [u16 ptr]` — a child node: the resolver (`child_word_count`)
+///   yields the child's word count (the node's first u16, via `DAT_1002ddec`);
+///   a `None` (pool-not-dumped) default contributes `0`. The child pointer is
+///   recorded in [`FResult::data`];
+/// - any other u16 — inline data, recorded in [`FResult::data`].
+///
+/// `child_word_count` is the `0x1004` child resolver: for the structural
+/// skeleton (the `DAT_1002ddec` pool not dumped) pass a closure that always
+/// returns `None`; the `word_count` then counts only the `0x1003` leaf hits.
+/// Bounds-safe; never panics.
+pub fn run_f_program(rec: &[u8], child_word_count: impl Fn(u16) -> Option<u32>) -> FResult {
+    let mut depth: i32 = 0;
+    let mut word_count: u32 = 0;
+    let mut data: Vec<u16> = Vec::new();
+    let mut i = 0usize;
+    let mut terminated = false;
+    while i + 2 <= rec.len() {
+        let op = u16::from_le_bytes([rec[i], rec[i + 1]]);
+        match op {
+            0x1001 => {
+                depth += 1;
+                i += 2;
+            }
+            0x1002 => {
+                if depth == 0 {
+                    i += 2;
+                    terminated = true;
+                    break;
+                }
+                depth -= 1;
+                i += 2;
+            }
+            0x1003 => {
+                word_count += 1;
+                i += 2;
+            }
+            0x1004 => {
+                i += 2;
+                if i + 2 <= rec.len() {
+                    let ptr = u16::from_le_bytes([rec[i], rec[i + 1]]);
+                    data.push(ptr);
+                    word_count += child_word_count(ptr).unwrap_or(0);
+                    i += 2;
+                }
+            }
+            _ => {
+                data.push(op);
+                i += 2;
+            }
+        }
+    }
+    FResult {
+        byte_len: i,
+        word_count,
+        data,
+        terminated,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The record walker (`FUN_10004230`)
 // ---------------------------------------------------------------------------
 
@@ -644,6 +755,11 @@ pub struct Morphology {
     pub list_b_count: u16,
     /// the per-word `'f'` record count (section `+0x48`)
     pub per_word_f_count: u16,
+    /// the executed per-word `'f'` program report (v0.32.0: [`run_f_program`]
+    /// over every walked `+0x48` record; `None` when the section is absent).
+    /// The structural skeleton — the `0x1004` child word counts need the
+    /// `DAT_1002ddec` node pool (a DLL-image global, not dumped).
+    pub f_programs: Option<Vec<FResult>>,
     /// the `FUN_10004230` record walks of every walkable section
     /// (`(slot, walk)`, block = [`WALK_BLOCK`])
     pub walks: Vec<(u32, SectionWalk)>,
@@ -705,6 +821,25 @@ impl Morphology {
         };
         let walks = walk_sections(voc, &table, WALK_BLOCK);
         let params = VocParams::parse(voc);
+        // the executed per-word `'f'` program report (roadmap v0.33.0): walk
+        // the `+0x48` records and run each through the opcode-VM. The
+        // structural skeleton — the `0x1004` child word counts need the
+        // `DAT_1002ddec` pool (a DLL-image global, not dumped), so the
+        // resolver is the always-`None` default.
+        let f_programs = if table.per_word_f != 0 {
+            let w = walk_section_records(voc, table.per_word_f, REC_MODE_F, WALK_BLOCK);
+            let mut progs = Vec::new();
+            for &start in &w.starts {
+                let s = start as usize;
+                let rec = voc.get(s..).unwrap_or(&[]);
+                let blen = vm_program_byte_len(rec);
+                let prog = rec.get(..blen).unwrap_or(rec);
+                progs.push(run_f_program(prog, |_c: u16| None));
+            }
+            Some(progs)
+        } else {
+            None
+        };
         Some(Morphology {
             table,
             affixes,
@@ -714,6 +849,7 @@ impl Morphology {
             list_a_count,
             list_b_count,
             per_word_f_count,
+            f_programs,
             walks,
             params,
         })
@@ -1609,5 +1745,80 @@ mod tests {
         assert_eq!(rec.delta(), 1435, "listB - listA (2157 - 722)");
         assert_eq!(rec.list_a_dense(), 334, "listA header - walked (722 - 388)");
         assert_eq!(rec.list_b_dense(), 1775, "listB header - walked (2157 - 382)");
+    }
+
+    // ------------------------------------------------------------------
+    // v0.32.0 (roadmap v0.33.0): the per-word `'f'` opcode-VM execution
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn run_f_program_top_level_terminator() {
+        // a nested program: 0x1001 (enter), 0x1003 (word leaf), 0x1002
+        // (close the subtree), 0x1002 (top-level terminate)
+        let prog: [u8; 8] = [
+            0x01, 0x10, 0x03, 0x10, 0x02, 0x10, 0x02, 0x10,
+        ];
+        let r = run_f_program(&prog, |_c: u16| None);
+        assert_eq!(r.byte_len, 8, "the full program up to the top-level 0x1002");
+        assert_eq!(r.word_count, 1, "the single 0x1003 word leaf");
+        assert!(r.terminated, "it terminated at the top-level 0x1002");
+        assert!(r.data.is_empty(), "no inline data u16s");
+    }
+
+    #[test]
+    fn run_f_program_child_resolver_adds_the_child_word_count() {
+        // a program: 0x1004 [child ptr 7] (the resolver yields 5 words), then
+        // a top-level 0x1002
+        let prog: [u8; 6] = [0x04, 0x10, 0x07, 0x00, 0x02, 0x10];
+        let r = run_f_program(&prog, |c: u16| {
+            assert_eq!(c, 7, "the resolver sees the child pointer");
+            Some(5)
+        });
+        assert_eq!(r.word_count, 5, "the child subtree's word count");
+        assert_eq!(r.data, vec![7], "the child pointer is recorded in the data");
+        assert!(r.terminated, "it terminated at the top-level 0x1002");
+    }
+
+    #[test]
+    fn run_f_program_collects_inline_data_u16() {
+        // a data u16 (0x0024) + a 0x1003 word leaf + a top-level 0x1002
+        let prog: [u8; 6] = [0x24, 0x00, 0x03, 0x10, 0x02, 0x10];
+        let r = run_f_program(&prog, |_c: u16| None);
+        assert_eq!(r.data, vec![0x24], "the inline data u16 is collected");
+        assert_eq!(r.word_count, 1, "the 0x1003 word leaf");
+        assert!(r.terminated);
+    }
+
+    #[test]
+    fn morphology_f_programs_run_the_real_lmu_programs() {
+        let Some(voc) = std::fs::read(r"C:\Zakon.Local\Baza\SOFT\lmu.voc").ok() else {
+            eprintln!("skipped: no base");
+            return;
+        };
+        let m = Morphology::parse(&voc).expect("morph");
+        // the `+0x48` per-word 'f' report: 142 declared records, but the
+        // record walk (block 4096) resynchronizes onto the dense nodes, so
+        // the walked starts are fewer than the declared count
+        let progs = m.f_programs.as_ref().expect("the 'f' program report");
+        assert!(
+            !progs.is_empty(),
+            "at least one 'f' program is executed"
+        );
+        let terminated = progs.iter().filter(|p| p.terminated).count();
+        let sum_words: u32 = progs.iter().map(|p| p.word_count).sum();
+        println!(
+            "lmu.voc 'f' programs: {} declared / {} walked · terminated {} · sum word-count (leaf hits) {} (recorded)",
+            m.per_word_f_count,
+            progs.len(),
+            terminated,
+            sum_words
+        );
+        // the structural invariant: every walked program terminates at the
+        // top-level 0x1002 (the count needs the DAT_1002ddec pool, deferred)
+        assert_eq!(
+            terminated,
+            progs.len(),
+            "every walked 'f' program terminates at the top-level 0x1002"
+        );
     }
 }

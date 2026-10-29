@@ -55,14 +55,23 @@
   fold-пары, записи словника, vt-поток); без папки SOFT (база
   GK) — корректное «индексов нет, поиск идёт своим движком
   экспортера».
-- **`tsearch <query>` — экспериментальный Trident-движок**
+- **`tsearch <query>` — Trident-движок (v0.39.0: production)**
   (нативный индекс, `src/trident.rs`): запрос кодируется через
   LmCode-таблицу (подтверждённые якоря А/О/У/Щ + цифры + Latin;
   с/і — кандидаты по частоте, подтверждение в v0.14.0),
   сопоставляется со словарём lmu.voc (префиксы + стем-обрезки),
   postings читаются из lmur.vt → native Trident-ID документов
   (2005-индекс; связь с номерами текущей базы + морфология
-  .g/.gw — v0.14.0). В GUI — чекбокс «Trident-рушій (нативний
+  .g/.gw — v0.14.0). **v0.39.0 (roadmap v0.40.0): маршрут помечен
+  production** — 100-запросный оракульный корпус (`tsearch --corpus
+  corpus/trident_oracle_100.txt`: полная цепочка tsearch vs ftsearch,
+  один проход по `.mb`; матрица збігу + failure-mode таблица
+  `TridentError` (NoMatch/EmptyJoin/OutOfRange, zero panics), UA+EN — в
+  CHANGELOG v0.39.0); `--fetch N` / `--print` (v0.38.0). EN: the
+  Trident route is marked **production** (roadmap v0.40.0): a 100-query
+  oracle corpus (full tsearch chain vs the ftsearch oracle, single `.mb`
+  pass) with the `TridentError` failure-mode table (UA+EN in CHANGELOG
+  v0.39.0). В GUI — чекбокс «Trident-рушій (нативний
   індекс, експеримент)»: при отмеченном флаге поиск идёт через
   нативный индекс (строки = native IDs, реквизитные столбцы —
   даше); выключен по умолчанию.
@@ -112,7 +121,8 @@ zakonexport-cli extract <docnum>     # полный текст документ�
 zakonexport-cli signal <docnum>      # найти signal-приложение (если есть)
 zakonexport-cli print  <docnum> [docnum ...]  # GDI-друк (системный диалог печати; партия)
 zakonexport-cli trident                       # инвентарь нативных FTS-индексов (SOFT\)
-zakonexport-cli tsearch <query>               # эксперимент: поиск по нативному Trident-индексу
+zakonexport-cli tsearch <query> [--oracle] [--fetch N] [--print] [--corpus <file>]
+                        # Trident-пошук (v0.39.0: production; --corpus = 100-запитний оракульний корпус)
 zakonexport-cli bulk [--format …] [--out dir] [--max n]
 zakonexport-cli stats
 zakonexport-cli about               # версия/автор
@@ -170,6 +180,25 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.39.0** — **hardening + production marking (roadmap v0.40.0)**:
+  100-запитний оракульний корпус (`corpus/trident_oracle_100.txt`,
+  `tsearch --corpus <file>` — повна tsearch-ланцюга vs ftsearch-оракула,
+  один `.mb`-прохід; збіг-матриця + failure-mode таблиця
+  `TridentError` (NoMatch/EmptyJoin/OutOfRange, zero panics)),
+  production-статусний рядок у слові `trident` («Trident-маршрут:
+  production (оракельно підтверджено, roadmap v0.40.0)»), явна
+  `TridentError`-поверхня замість тихих порожніх (no panics on partial
+  data), швидкий presence-only oracle-скан (`scan_present`), 199
+  юніт-тестів. /
+  **Hardening + production marking (roadmap v0.40.0):** the 100-query
+  oracle corpus (`corpus/trident_oracle_100.txt`, `tsearch --corpus
+  <file>` — the full tsearch chain vs the ftsearch oracle in a single
+  `.mb` pass; the agreement matrix + the `TridentError` failure-mode
+  table (NoMatch/EmptyJoin/OutOfRange, zero panics)), the production
+  status line in the `trident` verb ("Trident route: production
+  (oracle-confirmed, roadmap v0.40.0)"), the explicit `TridentError`
+  error surface instead of silent empties (no panics on partial data),
+  and the fast presence-only oracle scan (`scan_present`), 199 unit tests.
 - **v0.16.0** — **виявлено базовий кодувальник документів**
   (`src/ftsearch.rs`) + **`ftsearch` — повний текстовий пошук по
   `.mb`** (механізм оракула старої програми, без B-tree). Текст `.mb`

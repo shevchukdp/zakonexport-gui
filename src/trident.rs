@@ -668,6 +668,99 @@ pub struct TridentResult {
     pub vt_size: usize,
 }
 
+/// v0.39.0 (roadmap v0.40.0): the explicit Trident error surface — the
+/// failure modes of the tsearch chain, named instead of silent empties
+/// (no panics on partial data). EN: the named failure modes of the tsearch
+/// chain; every silent empty a query can end with has a variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TridentError {
+    /// The base has no working Trident index (SOFT\lmu.voc + lmur.vt) — the
+    /// base is not Trident-enabled (e.g. the guitest GK base).
+    NoIndex(PathBuf),
+    /// None of the query terms were found in the dictionary — the
+    /// documented packed-B-tree gap (a full word set is not a raw `.vt`
+    /// byte run). `absent` lists the terms that did not match.
+    NoMatch { absent: Vec<String> },
+    /// The terms matched the dictionary, but no `.vt` record carries their
+    /// stems (an empty exact join).
+    EmptyJoin,
+    /// Every joined native u16 is wider than the base's docnum space (the
+    /// 2005-era space is wider; the openable subset is empty).
+    OutOfRange { doc_count: u32 },
+}
+
+impl std::fmt::Display for TridentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoIndex(p) => write!(
+                f,
+                "NoIndex — в базі {} немає Trident-індексу (SOFT\\lmu.voc + \
+                 lmur.vt)",
+                p.display()
+            ),
+            Self::NoMatch { absent } => write!(
+                f,
+                "NoMatch — термін(и) не знайдено в словнику: {} (packed-B-tree \
+                 word-set — не raw .vt byte-run; задокументований gap)",
+                absent
+                    .iter()
+                    .map(|t| format!("«{t}»"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::EmptyJoin => write!(
+                f,
+                "EmptyJoin — термін(и) знайдено в словнику, але .vt-стрім не \
+                 містить їхніх стемів (0 record-ів)"
+            ),
+            Self::OutOfRange { doc_count } => write!(
+                f,
+                "OutOfRange — усі jointi u16 > {doc_count} docnum (2005-простір \
+                 ширший за базу; openable-підмножина порожня)"
+            ),
+        }
+    }
+}
+
+/// v0.39.0 (roadmap v0.40.0): classify a `TridentResult` into the explicit
+/// error surface. `None` when the result is healthy (a matched term with
+/// join evidence, and at least one openable u16 when `doc_count` is
+/// given); `Some(TridentError)` when the result is a silent empty:
+/// `NoMatch` (nothing matched), `EmptyJoin` (matched, no `.vt` records),
+/// `OutOfRange` (every u16 wider than the base). `doc_count` is
+/// `None` when the base was not loaded (the `OutOfRange` check is skipped).
+pub fn classify(
+    query: &str,
+    r: &TridentResult,
+    doc_count: Option<u32>,
+) -> Option<TridentError> {
+    if query.split_whitespace().next().is_none() {
+        return None; // an empty query is a caller error, not a Trident error
+    }
+    if r.joined.is_empty() {
+        if r.matched.is_empty() {
+            let absent: Vec<String> = query
+                .split_whitespace()
+                .filter(|t| !r.matched.iter().any(|m| m == t))
+                .map(|t| t.to_string())
+                .collect();
+            return Some(TridentError::NoMatch { absent });
+        }
+        return Some(TridentError::EmptyJoin);
+    }
+    if let Some(cc) = doc_count {
+        let openable = r.joined.iter().any(|(_, _, u16s)| {
+            u16s
+                .iter()
+                .any(|&u| u != 0 && u32::from(u) <= cc)
+        });
+        if !openable {
+            return Some(TridentError::OutOfRange { doc_count: cc });
+        }
+    }
+    None
+}
+
 /// The known SOFT\ inventory (16 files, incl. `windows.kod` + `lm.a`).
 pub const INVENTORY: [(&str, &str); 16] = [
     ("lmu.voc", "словник (ukr)"),
@@ -892,6 +985,37 @@ impl TridentIndex {
         a.dict_size += b.dict_size;
         a.vt_size += b.vt_size;
         a
+    }
+
+    /// v0.39.0 (roadmap v0.40.0): search + the explicit error surface —
+    /// `Err(TridentError)` when the result is a silent empty (no panics on
+    /// partial data) instead of an empty `TridentResult`. `doc_count` (the
+    /// base's docnum space) enables the `OutOfRange` check; pass `None`
+    /// when the base is not loaded (the check is skipped).
+    pub fn search_checked(
+        &self,
+        query: &str,
+        lang: Lang,
+        doc_count: Option<u32>,
+    ) -> Result<TridentResult, TridentError> {
+        let r = self.search_lang(query, lang);
+        match classify(query, &r, doc_count) {
+            Some(e) => Err(e),
+            None => Ok(r),
+        }
+    }
+
+    /// The auto (merged) variant (v0.39.0).
+    pub fn search_auto_checked(
+        &self,
+        query: &str,
+        doc_count: Option<u32>,
+    ) -> Result<TridentResult, TridentError> {
+        let r = self.search_auto(query);
+        match classify(query, &r, doc_count) {
+            Some(e) => Err(e),
+            None => Ok(r),
+        }
     }
 
     /// The per-language search core (v0.25.0): encode the query terms
@@ -1447,6 +1571,114 @@ mod tests {
                 "the tight bound only drops docnums, it never adds"
             );
         }
+    }
+
+    #[test]
+    fn classify_names_the_failure_modes() {
+        // v0.39.0 (roadmap v0.40.0): the explicit error surface — the four
+        // failure modes of the tsearch chain (no panics on partial data).
+        // NoMatch: nothing matched, no join (the documented packed-B-tree
+        // gap for «конституція»-class terms)
+        let r = TridentResult::default();
+        match classify("конституція", &r, Some(1000)) {
+            Some(TridentError::NoMatch { absent }) => {
+                assert_eq!(absent, vec!["конституція".to_string()]);
+            }
+            other => panic!("expected NoMatch, got {other:?}"),
+        }
+        // EmptyJoin: the term matched the dictionary, but no .vt record
+        // carries its stem
+        let r = TridentResult {
+            matched: vec!["зак".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            classify("зак", &r, Some(1000)),
+            Some(TridentError::EmptyJoin)
+        );
+        // OutOfRange: every joined u16 is wider than the base's space
+        let r = TridentResult {
+            matched: vec!["не".to_string()],
+            joined: vec![("NE".to_string(), 0x10, vec![4000u16, 0])],
+            ..Default::default()
+        };
+        assert_eq!(
+            classify("не", &r, Some(1000)),
+            Some(TridentError::OutOfRange { doc_count: 1000 })
+        );
+        // healthy: an openable u16 keeps the result `None`
+        let r = TridentResult {
+            matched: vec!["не".to_string()],
+            joined: vec![("NE".to_string(), 0x10, vec![77u16, 0])],
+            ..Default::default()
+        };
+        assert_eq!(classify("не", &r, Some(1000)), None);
+        // a `None` doc_count skips the OutOfRange check (the base is not
+        // loaded) — the wide u16s stay healthy
+        assert_eq!(classify("не", &TridentResult {
+            matched: vec!["не".to_string()],
+            joined: vec![("NE".to_string(), 0x10, vec![4000u16])],
+            ..Default::default()
+        }, None), None);
+        // an empty query is a caller error, not a Trident error
+        assert_eq!(classify("", &TridentResult::default(), None), None);
+        // a multi-term query with NOTHING matched lists all the terms
+        match classify("зак конституція", &TridentResult::default(), None) {
+            Some(TridentError::NoMatch { absent }) => {
+                assert_eq!(
+                    absent,
+                    vec!["зак".to_string(), "конституція".to_string()]
+                );
+            }
+            other => panic!("expected NoMatch, got {other:?}"),
+        }
+        // a multi-term query where SOME term matched the dictionary is an
+        // EmptyJoin (the joined stream is empty) — the NoMatch list covers
+        // the wholly-absent case only
+        let r = TridentResult {
+            matched: vec!["зак".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            classify("зак конституція", &r, None),
+            Some(TridentError::EmptyJoin)
+        );
+    }
+
+    #[test]
+    fn corpus_subset_zero_panic_on_real_base() {
+        // v0.39.0 (roadmap v0.40.0): the corpus's first 8 lines run through
+        // the full tsearch chain + the classifier without panics (the
+        // zero-panic proof over the documented failure modes), and the
+        // known-good «не» anchor classifies as healthy.
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let text = std::fs::read_to_string("corpus/trident_oracle_100.txt")
+            .expect("the corpus file is in the repo");
+        let qs: Vec<&str> = text
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .take(8)
+            .collect();
+        assert_eq!(qs.len(), 8, "the corpus's first 8 queries");
+        let idx = TridentIndex::open(baza).expect("index should load");
+        for q in &qs {
+            let r = idx.search_lang(q, Lang::Ukr);
+            let _ = classify(q, &r, None); // must not panic (partial data)
+            assert!((0.0..=1.0).contains(&r.coverage));
+        }
+        // the confirmed «не» anchor is healthy (openable u16s in the base)
+        let r = idx.search_lang("не", Lang::Ukr);
+        assert!(!r.joined.is_empty(), "«не» joins into the .vt stream");
+        assert_eq!(
+            classify("не", &r, Some(u32::MAX)),
+            None,
+            "the «не» result is healthy (no TridentError)"
+        );
     }
 
     #[test]

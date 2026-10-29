@@ -227,6 +227,20 @@ fn scan_offsets(buf: &[u8], pat: &[u8]) -> Vec<u64> {
     out
 }
 
+/// v0.39.0 (roadmap v0.40.0): the presence-only variant of
+/// [`scan_offsets`] — early-break on the first match. Identical match
+/// semantics (byte-exact), but no offset collection: the oracle's
+/// distinct-file count needs *presence* (a hit in the file), not the hit
+/// offsets. Used for the short (2-byte) variants of [`oracle_multi`] and
+/// as the fallback presence probe.
+fn scan_present(buf: &[u8], pat: &[u8]) -> bool {
+    let plen = pat.len();
+    if plen == 0 || plen > buf.len() {
+        return false;
+    }
+    buf.windows(plen).any(|w| w == pat)
+}
+
 /// Full-text search a query term across the base's `.mb` document files
 /// (lowercase + title-case), returning the `(file, offset)` hits in the
 /// oracle's shape.
@@ -324,8 +338,11 @@ pub struct OracleCounts {
 
 /// Count, for each `terms[i]`, how many distinct `.mb` files of the base
 /// contain the term (lowercase + title-case variants) — in one pass over the
-/// files. The distinct-file count is the oracle's "document count" for the
-/// term, used by the `--oracle` cross-check in `tsearch`.
+/// files (v0.39.0: a single-pass multi-pattern presence check per file —
+/// a 3-byte-prefix bucket + a 256-bit byte set detect ALL the variants in
+/// ONE pass over the file, instead of one pass per variant). The
+/// distinct-file count is the oracle's "document count" for the term, used
+/// by the `--oracle` cross-check and the `--corpus` matrix in `tsearch`.
 pub fn oracle_multi(baza: &Path, terms: &[&str]) -> OracleCounts {
     let files = collect_mb_files(baza);
     // encode each term's variants once (lower + title), dropping empties
@@ -344,25 +361,130 @@ pub fn oracle_multi(baza: &Path, terms: &[&str]) -> OracleCounts {
             vs
         })
         .collect();
-    // per-term distinct-file counters (a HashSet of the relative file paths)
-    let mut counters: Vec<std::collections::HashSet<PathBuf>> =
+    // per-term distinct-file counters (a HashSet of the relative file
+    // paths); a worker pool over the files (one file per task, counters
+    // under a Mutex) keeps the single-pass semantics — every file is
+    // counted at most once per term — while scaling across cores.
+    let counters: Vec<std::collections::HashSet<PathBuf>> =
         terms.iter().map(|_| std::collections::HashSet::new()).collect();
-    for f in &files {
+    let counters = std::sync::Mutex::new(counters);
+    let nthreads = std::cmp::min(
+        files.len(),
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8),
+    );
+    // v0.39.0 (roadmap v0.40.0): the single-pass multi-pattern presence
+    // check — instead of scanning the (several-GB) corpus once per variant
+    // (a 100-query corpus = a couple hundred full passes), ONE pass over a
+    // file detects ALL variants at once: a 3-byte-prefix bucket (every
+    // variant with len >= 3), a 256-bit byte set (the 1-byte variants,
+    // built in the same pass) and a short direct check (2-byte variants).
+    // Identical presence semantics to the per-variant `scan_present`, with
+    // ~200× less data moved.
+    #[derive(Clone, Copy)]
+    struct Slot {
+        ti: usize,
+        vi: usize,
+    }
+    let mut buckets: std::collections::HashMap<u64, Vec<Slot>> =
+        std::collections::HashMap::new();
+    for (ti, vs) in variants.iter().enumerate() {
+        for (vi, v) in vs.iter().enumerate() {
+            if v.len() >= 3 {
+                let key = ((v[0] as u64) << 16) | ((v[1] as u64) << 8) | (v[2] as u64);
+                buckets.entry(key).or_default().push(Slot { ti, vi });
+            }
+        }
+    }
+    let scan_file = |f: &Path| {
         let buf = match fs::read(f) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(_) => return,
         };
         let rel = f
             .strip_prefix(baza)
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| f.clone());
-        for (ti, vs) in variants.iter().enumerate() {
-            // the term counts as present in this file if any variant hits
-            if vs.iter().any(|v| !v.is_empty() && !scan_offsets(&buf, v).is_empty()) {
-                counters[ti].insert(rel.clone());
+            .unwrap_or_else(|_| f.to_path_buf());
+        // the single-pass presence check: per-term hit flags + the 256-bit
+        // byte set (for the 1-byte variants), built in the same pass
+        let mut hits = vec![false; variants.len()];
+        let mut byteset: [u64; 4] = [0; 4];
+        let n = buf.len();
+        for i in 0..n.saturating_sub(2) {
+            let b = buf[i];
+            byteset[(b / 64) as usize] |= 1u64 << (b % 64);
+            let key = ((b as u64) << 16) | ((buf[i + 1] as u64) << 8) | (buf[i + 2] as u64);
+            if let Some(slots) = buckets.get(&key) {
+                for s in slots {
+                    if !hits[s.ti] {
+                        let v = &variants[s.ti][s.vi];
+                        if buf[i..i + v.len()] == v[..] {
+                            hits[s.ti] = true;
+                        }
+                    }
+                }
             }
         }
+        // the last two bytes still feed the byte set (edge)
+        for i in n.saturating_sub(2)..n {
+            let b = buf[i];
+            byteset[(b / 64) as usize] |= 1u64 << (b % 64);
+        }
+        // the short variants: 1 byte via the byte set, 2 bytes direct
+        for (ti, vs) in variants.iter().enumerate() {
+            if hits[ti] {
+                continue;
+            }
+            for v in vs {
+                if v.len() == 1 {
+                    let b = v[0];
+                    if byteset[(b / 64) as usize] & (1u64 << (b % 64)) != 0 {
+                        hits[ti] = true;
+                        break;
+                    }
+                } else if v.len() == 2 && scan_present(&buf, v) {
+                    hits[ti] = true;
+                    break;
+                }
+            }
+        }
+        let hit_terms: Vec<usize> = (0..variants.len()).filter(|&ti| hits[ti]).collect();
+        if hit_terms.is_empty() {
+            return;
+        }
+        let mut guard = counters.lock().unwrap();
+        for ti in hit_terms {
+            guard[ti].insert(rel.clone());
+        }
+    };
+    if nthreads > 1 {
+        // `&Vec` and `&closure` are Copy — each worker moves its own copy
+        let files_ref = &files;
+        let scan_ref = &scan_file;
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for w in 0..nthreads {
+                handles.push(s.spawn(move || {
+                    for (fi, f) in files_ref.iter().enumerate() {
+                        if fi % nthreads != w {
+                            continue;
+                        }
+                        scan_ref(f);
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+    } else {
+        for f in &files {
+            scan_file(f);
+        }
     }
+    let counters = counters.lock().unwrap();
     let per_term = terms
         .iter()
         .enumerate()
@@ -381,6 +503,31 @@ pub fn oracle_multi(baza: &Path, terms: &[&str]) -> OracleCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_present_early_break_matches_offsets() {
+        // v0.39.0: the presence-only scan must agree with
+        // `scan_offsets(...).is_empty()` on every edge case
+        let buf = b"abcdefabcdef";
+        let pats: &[&[u8]] = &[
+            b"abc",
+            b"def",
+            b"abcabc",
+            b"xyz",
+            b"",
+            b"abcdefghij", // longer than the buffer
+            b"f",
+        ];
+        for pat in pats {
+            assert_eq!(
+                scan_present(buf, pat),
+                !scan_offsets(buf, pat).is_empty(),
+                "presence must match the offset scan for {pat:?}"
+            );
+        }
+        assert!(scan_present(b"hello", b"llo"));
+        assert!(!scan_present(b"", b"x"));
+    }
 
     #[test]
     fn standard_cyrillic_is_cp1251() {
@@ -487,6 +634,79 @@ mod tests {
         assert_eq!(OracleTerm::agreement(10, 10), 1.0);
         assert_eq!(OracleTerm::agreement(1, 10), 0.1);
         assert!((OracleTerm::agreement(9, 10) - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn oracle_multi_multipattern_matches_variants() {
+        // v0.39.0 (roadmap v0.40.0): the single-pass multi-pattern
+        // presence check (3-byte-prefix bucket + 256-bit byte set + short
+        // direct) must count EXACTLY the same distinct files as an
+        // independent per-variant reference — across 1/2/3+ byte variants
+        // (lower + title case), including a term with zero hits.
+        let dir = std::env::temp_dir().join(format!(
+            "zakon_oracle_mp_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // cp1251 byte runs (the confirmed encodings from the tests above)
+        let zak = [0xE7u8, 0xE0, 0xE3, 0xEB, 0xE5]; // «закон» lower
+        let zak_t = [0xC7u8, 0xE0, 0xE3, 0xEB, 0xE5]; // «Закон» title (З = 0xC7)
+        let files: Vec<(&str, Vec<u8>)> = vec![
+            ("f1.mb", zak.to_vec()), // «закон» lower only
+            ("f2.mb", zak_t.to_vec()), // «Закон» title only
+            ("f3.mb", vec![0xE7]), // «з» (1 byte)
+            ("f4.mb", vec![0xE7, 0xE0]), // «за» (2 bytes)
+            ("f5.mb", vec![0xE7, 0xE0, 0xE3, 0xEB]), // «зак» (a 4-byte prefix run)
+        ];
+        for (name, bytes) in &files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        let terms: Vec<&str> = vec!["закон", "з", "за", "конституція"];
+        // the independent reference: a plain per-variant windows() scan,
+        // mirroring oracle_multi's variant construction (lower + title)
+        let mut expected: Vec<(String, usize)> = Vec::new();
+        for t in &terms {
+            let (b, _, _) = encode_term(t, false);
+            let (bt, _, _) = encode_term(t, true);
+            let mut vs = vec![b];
+            if !bt.is_empty() && !vs.contains(&bt) {
+                vs.push(bt);
+            }
+            let count = files
+                .iter()
+                .filter(|(_, data)| {
+                    vs.iter().any(|v| {
+                        !v.is_empty()
+                            && data
+                                .windows(v.len())
+                                .any(|w| w == v.as_slice())
+                    })
+                })
+                .count();
+            expected.push((t.to_string(), count));
+        }
+        let r = oracle_multi(&dir, &terms);
+        assert_eq!(r.per_term.len(), terms.len());
+        for (t, want) in &expected {
+            let got = r
+                .per_term
+                .iter()
+                .find(|(n, _)| n == t)
+                .map(|x| x.1)
+                .unwrap_or(usize::MAX);
+            assert_eq!(
+                got, *want,
+                "«{t}»: the multi-pattern pass must match the per-variant reference"
+            );
+        }
+        // the zero-hit term stays zero (no false positives from the
+        // 3-byte-prefix bucket or the byte set)
+        assert_eq!(
+            r.per_term.iter().find(|(n, _)| n == "конституція").unwrap().1,
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,0 +1,118 @@
+# v0.39.0 (roadmap v0.40.0): the 100-query oracle corpus (UA+EN).
+# Each non-# line is ONE tsearch query (space-separated terms).
+# Run: zakonexport-cli tsearch --corpus corpus/trident_oracle_100.txt --baza <path>
+# The full chain per query: encode -> dictionary match -> exact .vt stem-join
+# -> native u16 -> the ftsearch oracle count agreement (single .mb pass),
+# classified by the TridentError surface (OK / NoMatch / EmptyJoin / OutOfRange).
+#
+# Group A: stems/prefixes present in the .vt stream (25)
+не
+пере
+по
+зак
+розп
+про
+ухвал
+постанов
+наказ
+розпоряд
+договор
+кредит
+бюджет
+податк
+заробіт
+соціал
+держав
+уряд
+кабінет
+міністр
+парламент
+суд
+банк
+ліценз
+дозвол
+#
+# Group B: full statutory words (30)
+закон
+кодекс
+конституція
+стаття
+санкція
+норма
+прав
+обов'язк
+підстав
+рішен
+розгляд
+скарг
+апеляц
+касац
+процес
+виконав
+договір
+зобов'язан
+відповідаль
+кримінал
+цивіль
+адміністратив
+податков
+митн
+валют
+ліцензія
+дозвіл
+умова
+строк
+порядок
+#
+# Group C: proper nouns (25)
+Україна
+Київ
+Одеса
+Львів
+Дніпро
+Верховна Рада
+Кабінет Міністрів
+Національний банк
+Служба безпеки
+Верховний Суд
+Конституційний Суд
+Мінфін
+МВС
+МОЗ
+ЗСУ
+НАБУ
+Держрезерв
+УДКУ
+ОДА
+Державний
+міжнародн
+інвест
+страхов
+банкрут
+реєстр
+#
+# Group D: mixed-language / English probes (12)
+constitution
+law
+decree
+budget
+tax
+court
+Ukraine
+Kyiv
+Верховний суд
+Мін'юст
+апеляційний
+касаційний
+#
+# Group E: edge cases (8)
+х
+з
+а
+ї
+123
+ab
+конст
+закон конст
+#
+# Total: 100 query lines.

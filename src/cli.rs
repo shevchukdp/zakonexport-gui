@@ -46,7 +46,7 @@ Usage:
           exact Latin mapping (v0.34.0: latin_exact preferred-variant exact path + real-corpus .vt hit rate);
           legacy-engine parity (v0.35.0: lmsup.dll NE 16-bit no-LMaster_* vs lmsup32.dll PE32 LMaster_{{Begin,End,Lang,Tran}});
           search via tsearch — experimental)
-  zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto] [--fetch N] [--print]
+  zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto] [--fetch N] [--print] [--corpus <file>]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
           or the Russian lmr.voc + lmru.vt) — the legacy main app's engine.
           Document numbers are native 2005-era Trident u16 ids; the
@@ -56,7 +56,9 @@ Usage:
           Russian streams (v0.25.0); --fetch N (v0.38.0) resolves the
           joined native docnums into top-N title + first-paragraph snippets
           (search->docnum->document, end-to-end), --print GDI-prints the
-          top-N joined docs
+          top-N joined docs; --corpus <file> (v0.39.0) runs an N-line
+          oracle corpus (the 100-query matrix + the TridentError
+          failure-mode table; single ftsearch pass, zero panics)
   zakonexport-cli ftsearch <query>  full-text scan of the base's `.mb`
           document files (case-insensitive exact word — the legacy app's
           oracle mechanism); reports (file @ offset) hits like the oracle,
@@ -162,6 +164,9 @@ struct Options {
     top_n: usize,
     /// tsearch: GDI printdoc of the top-N joined docnums (v0.38.0)
     print: bool,
+    /// tsearch: the N-query oracle corpus file (the 100-query corpus + the
+    /// TridentError failure-mode table, v0.39.0)
+    corpus: Option<PathBuf>,
 }
 
 /// v0.26.0: the `.m` section-walker summary line for the `trident` verb
@@ -248,6 +253,7 @@ fn parse_args() -> Options {
         fetch: false,
         top_n: 10,
         print: false,
+        corpus: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -389,6 +395,12 @@ fn parse_args() -> Options {
             "--print" => {
                 o.print = true;
                 i += 1;
+            }
+            "--corpus" if next(i).is_some() => {
+                // v0.39.0: `tsearch --corpus <file>` — the N-query oracle
+                // corpus (the 100-query matrix + the TridentError modes)
+                o.corpus = Some(PathBuf::from(next(i).unwrap()));
+                i += 2;
             }
             other => {
                 pos.push(other.to_string());
@@ -560,6 +572,197 @@ fn apply_filters(o: &Options, hits: Vec<db::Hit>) -> Result<Vec<db::Hit>> {
     }
     eprintln!("filtered by fields: {total} -> {}", kept.len());
     Ok(kept)
+}
+
+/// v0.39.0 (roadmap v0.40.0): `tsearch --corpus <file>` — the N-query
+/// oracle corpus (the 100-query matrix, UA+EN): every line runs through the
+/// FULL tsearch chain (encode → dictionary match → exact `.vt` stem-join →
+/// native u16) and is cross-checked against the ftsearch oracle (a SINGLE
+/// `.mb` pass via `oracle_multi`), then classified by the `TridentError`
+/// surface (OK / NoMatch / EmptyJoin / OutOfRange). Zero panics. EN: the
+/// 100-query agreement matrix + the failure-mode table; the single oracle
+/// pass keeps an N-query corpus at one full scan.
+fn trident_corpus_run(o: &Options, path: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("корпус не читається: {e}"))?;
+    let queries: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    if queries.is_empty() {
+        bail!("корпус порожній: {}", path.display());
+    }
+    let Some(idx) = crate::trident::TridentIndex::open(&o.baza) else {
+        let e = crate::trident::TridentError::NoIndex(o.baza.clone());
+        println!("Trident-помилка (v0.39.0): {e}");
+        bail!("корпус не запущений: базі немає Trident-індексу");
+    };
+    let auto = matches!(o.lang.as_str(), "auto" | "both");
+    let rus = matches!(o.lang.as_str(), "r" | "rus" | "рус");
+    let lang_label = if auto {
+        "auto (ukr+rus)"
+    } else if rus {
+        "rus"
+    } else {
+        "ukr"
+    };
+    // v0.39.0: ONE oracle pass for the whole corpus (oracle_multi is
+    // designed to keep an N-query corpus at a single .mb scan)
+    let mut oterms: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for q in &queries {
+        for t in q.split_whitespace() {
+            if seen.insert(t) {
+                oterms.push(t.to_string());
+            }
+        }
+    }
+    let orefs: Vec<&str> = oterms.iter().map(|s| s.as_str()).collect();
+    eprintln!(
+        "corpus: {} запитів · {} термінів — oracle (ftsearch .mb-скан, single pass)...",
+        queries.len(),
+        oterms.len()
+    );
+    let oc = crate::ftsearch::oracle_multi(&o.baza, &orefs);
+    let files_by_term: std::collections::HashMap<&str, usize> =
+        oc.per_term.iter().map(|(t, n)| (t.as_str(), *n)).collect();
+    let dc_opt = render::Base::load(&o.baza).ok().map(|b| b.doc_count());
+    // the per-term join-doc count (cached per distinct term; auto = the
+    // union of both languages' u16 spaces, like the tsearch verb)
+    let term_docs = |t: &str| -> usize {
+        if auto {
+            let mut set: std::collections::HashSet<u16> =
+                std::collections::HashSet::new();
+            for v in idx.term_join_docs_lang(t, crate::trident::Lang::Ukr) {
+                set.insert(v);
+            }
+            for v in idx.term_join_docs_lang(t, crate::trident::Lang::Rus) {
+                set.insert(v);
+            }
+            set.len()
+        } else {
+            let l = if rus {
+                crate::trident::Lang::Rus
+            } else {
+                crate::trident::Lang::Ukr
+            };
+            idx.term_join_docs_lang(t, l).len()
+        }
+    };
+    println!(
+        "Trident corpus (v0.39.0, roadmap v0.40.0): {} запитів ({lang_label}) — {}",
+        queries.len(),
+        path.display()
+    );
+    println!(
+        "  oracle (ftsearch .mb-скан, single pass): {} файлів · {} термінів",
+        oc.files_scanned,
+        oterms.len()
+    );
+    let mut confirmed = 0usize;
+    // failure-mode counters: [OK, NoMatch, EmptyJoin, OutOfRange]
+    let mut mode_counts: [usize; 4] = [0; 4];
+    for (i, q) in queries.iter().enumerate() {
+        let r = if auto {
+            idx.search_auto(q)
+        } else {
+            let l = if rus {
+                crate::trident::Lang::Rus
+            } else {
+                crate::trident::Lang::Ukr
+            };
+            idx.search_lang(q, l)
+        };
+        let terms: Vec<&str> = q.split_whitespace().collect();
+        // the per-query tsearch column: the union of the per-term join
+        // doc-sets (single-term queries = the cached per-term count)
+        let tdocs: usize = if terms.len() <= 1 {
+            terms
+                .first()
+                .map(|t| term_docs(t))
+                .unwrap_or(0)
+        } else {
+            let mut set: std::collections::HashSet<u16> =
+                std::collections::HashSet::new();
+            for t in &terms {
+                if auto {
+                    for v in idx.term_join_docs_lang(t, crate::trident::Lang::Ukr) {
+                        set.insert(v);
+                    }
+                    for v in idx.term_join_docs_lang(t, crate::trident::Lang::Rus) {
+                        set.insert(v);
+                    }
+                } else {
+                    let l = if rus {
+                        crate::trident::Lang::Rus
+                    } else {
+                        crate::trident::Lang::Ukr
+                    };
+                    for v in idx.term_join_docs_lang(t, l) {
+                        set.insert(v);
+                    }
+                }
+            }
+            set.len()
+        };
+        // the per-query agreement: the mean of the per-term count
+        // agreements (the v0.24.0 convention; the oracle column shows the
+        // per-term MAX for multi-term queries)
+        let ofiles = terms
+            .iter()
+            .map(|t| files_by_term.get(*t).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let agree = if terms.is_empty() {
+            1.0
+        } else {
+            terms
+                .iter()
+                .map(|t| {
+                    let o = files_by_term.get(*t).copied().unwrap_or(0);
+                    crate::ftsearch::OracleTerm::agreement(term_docs(t), o)
+                })
+                .sum::<f64>()
+                / terms.len() as f64
+        };
+        let (mi, mlabel) = match crate::trident::classify(q, &r, dc_opt) {
+            None => (0, "OK"),
+            Some(crate::trident::TridentError::NoMatch { .. }) => (1, "NoMatch"),
+            Some(crate::trident::TridentError::EmptyJoin) => (2, "EmptyJoin"),
+            Some(crate::trident::TridentError::OutOfRange { .. }) => (3, "OutOfRange"),
+            // NoIndex is a per-RUN error (the index is open here); classify
+            // cannot return it per query
+            Some(crate::trident::TridentError::NoIndex(_)) => (1, "NoMatch"),
+        };
+        mode_counts[mi] += 1;
+        if agree >= 0.9 {
+            confirmed += 1;
+        }
+        println!(
+            "  [{i:03}] «{q}»: tsearch {tdocs} · oracle {ofiles} · збіг {agree:.2} \
+             · {mlabel}"
+        );
+    }
+    println!(
+        "  summary: оракельно підтверджено (збіг >= 0.9) {confirmed}/{} · failure \
+         modes: OK {} · NoMatch {} · EmptyJoin {} · OutOfRange {} · zero-panic",
+        queries.len(),
+        mode_counts[0],
+        mode_counts[1],
+        mode_counts[2],
+        mode_counts[3]
+    );
+    println!(
+        "  EN: {confirmed}/{} oracle-confirmed (agreement >= 0.9) · failure \
+         modes: OK {}/ NoMatch {}/ EmptyJoin {}/ OutOfRange {} · zero panics",
+        queries.len(),
+        mode_counts[0],
+        mode_counts[1],
+        mode_counts[2],
+        mode_counts[3]
+    );
+    Ok(())
 }
 
 /// v0.37.0 (roadmap v0.38.0): `export --trident-docs` — run the native
@@ -1769,6 +1972,23 @@ pub fn main_cli() {
                     ht,
                     hx
                 );
+                // v0.39.0: production marking (roadmap v0.40.0) — the
+                // 100-query oracle corpus (tsearch --corpus, the single
+                // ftsearch pass) + the TridentError surface (no silent
+                // empties, zero panics) mark the route production
+                println!(
+                    "Trident-маршрут: production (оракельно підтверджено, \
+                     roadmap v0.40.0) — 100-query corpus (збіг-матриця + \
+                     failure-mode таблиця, CHANGELOG v0.39.0) · \
+                     TridentError-поверхня (NoMatch/EmptyJoin/OutOfRange, \
+                     zero panics)"
+                );
+                println!(
+                    "EN: Trident route: production (oracle-confirmed, \
+                     roadmap v0.40.0) — 100-query corpus (agreement matrix + \
+                     failure-mode table, CHANGELOG v0.39.0) · the TridentError \
+                     surface (NoMatch/EmptyJoin/OutOfRange, zero panics)"
+                );
             }
             println!();
             println!(
@@ -1815,6 +2035,7 @@ pub fn main_cli() {
                   GUI Trident panel (v0.36.0: separate modal window reusing TridentIndex + lmcode_hex; tsearch chain query->LmCode->candidate->.vt@off->docnums; guitest trident= marker) \\\
                   export --trident-docs (v0.37.0: tsearch-joined native docnums -> bundle with a per-doc native-u16 evidence column; trident_docs_from_result openable resolution) \\\
                   tsearch --fetch [N] / --print (v0.38.0: top-N joined docnums -> title + first-paragraph snippet (search->docnum->document, end-to-end) / GDI printdoc; first_nonempty_line + first_body_line helpers) \\\
+                  hardening + production marking (v0.39.0: 100-query oracle corpus (tsearch --corpus, ftsearch single-pass oracle_multi, corpus/trident_oracle_100.txt) + TridentError surface (NoMatch/EmptyJoin/OutOfRange, no silent empties, zero panics) + trident status line «Trident-маршрут: production (оракельно підтверджено, roadmap v0.40.0)») \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())
@@ -1832,6 +2053,12 @@ pub fn main_cli() {
             // oracle (per-term count agreement; «оракельно підтверджено»
             // when the agreement >= 0.9).
             require_baza(&o)?;
+            // v0.39.0 (roadmap v0.40.0): --corpus <file> — the N-query
+            // oracle corpus (the full tsearch chain vs ftsearch, one oracle
+            // pass) + the TridentError failure-mode table (zero panics)
+            if let Some(cf) = o.corpus.clone() {
+                return trident_corpus_run(&o, &cf);
+            }
             let q = get_query(&o)?;
             if q.is_empty() {
                 usage();
@@ -2099,6 +2326,13 @@ pub fn main_cli() {
                     println!("    … (ще {})", r.docs.len() - 40);
                 }
             }
+            // v0.39.0 (roadmap v0.40.0): the explicit error surface
+            // (TridentError) — the silent empties named instead of a bare
+            // "0 документів" (no panics on partial data)
+            let dc_opt = if doc_count > 0 { Some(doc_count) } else { None };
+            if let Some(e) = crate::trident::classify(&q, &r, dc_opt) {
+                println!("  Trident-помилка (v0.39.0): {e}");
+            }
             // v0.38.0 (roadmap v0.39.0): --fetch [N] — top-N joined docnums ->
             // title + first-paragraph snippet (the search->docnum->document
             // chain, end-to-end via the db.rs docnum path)
@@ -2224,6 +2458,30 @@ pub fn main_cli() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corpus_file_has_100_queries() {
+        // v0.39.0 (roadmap v0.40.0): the 100-query oracle corpus in the
+        // repo — exactly 100 non-comment query lines (the UA+EN matrix).
+        let p = Path::new("corpus/trident_oracle_100.txt");
+        if !p.is_file() {
+            eprintln!("skipped: no corpus file");
+            return;
+        }
+        let text = std::fs::read_to_string(p).expect("corpus file");
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        assert_eq!(lines.len(), 100, "the corpus is a 100-query matrix");
+        for l in &lines {
+            assert!(
+                l.split_whitespace().next().is_some(),
+                "a query line is non-empty: {l}"
+            );
+        }
+    }
 
     #[test]
     fn first_nonempty_line_skips_blank_leading_lines() {

@@ -1206,6 +1206,98 @@ impl UseFile {
     }
 }
 
+/// v0.40.0 (roadmap v0.41.0): the engine's **write-mode per-language
+/// update cache** — `lm{lang}.uvt`. `lmsup32.dll` (`FUN_10015340`) opens
+/// `lm{lang}.m` ('R') + `lm{lang}.uvt` ('W') + `lm{lang}.vt` ('R'): the
+/// `.uvt` is the incremental update stream for the `.vt` postings, opened
+/// for writing only. In this read-only base the file is **absent** (the
+/// engine would create it on demand; nothing is ever written). EN: the
+/// `.uvt` update-cache state + a synthesizer that models "the file the
+/// engine would create on the first 'W' open of a base with no pending
+/// index updates".
+pub const UVT_LANGS: [(&str, &str, &str, &str); 2] = [
+    // (the on-disk `.uvt` name, the language, the corresponding `.vt`,
+    // the header name field of the synthesized file)
+    ("lmur.uvt", "ukr", "lmur.vt", "lmUR.uvt"),
+    ("lmru.uvt", "rus", "lmru.vt", "lmRU.uvt"),
+];
+
+/// One `.uvt` update-cache state entry (the `trident uvt` report).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UvtState {
+    /// The on-disk file name (e.g. `lmur.uvt`).
+    pub name: &'static str,
+    /// The language stream (`ukr` / `rus`).
+    pub lang: &'static str,
+    /// The file exists in the base's `SOFT\` folder.
+    pub present: bool,
+    /// The file size in bytes (0 when absent).
+    pub size: u64,
+    /// The parsed record count when present (0 = a never-written cache;
+    /// `None` when present but not parseable as the FREE-container form).
+    pub records: Option<usize>,
+}
+
+/// The `.uvt` update-cache state of a base's `SOFT\` folder (both
+/// language streams, the [`UVT_LANGS`] template).
+pub fn uvt_states(soft: &std::path::Path) -> [UvtState; 2] {
+    UVT_LANGS.map(|(name, lang, _, _)| {
+        let p = soft.join(name);
+        match std::fs::read(&p) {
+            Ok(b) => {
+                let records = TridentFileHeader::parse(&b).and_then(|h| {
+                    // two pinned shapes: the 204B FREE container
+                    // (`tail = 0`, a zero body like `.use`) or the
+                    // `.vt`-grammar stream (`tail >= 0x40`)
+                    if h.tail == 0 {
+                        Some(0usize)
+                    } else if h.tail >= 0x40 && (h.tail as usize) <= b.len() {
+                        VtRecordStream::parse(&b).map(|s| s.records.len())
+                    } else {
+                        None
+                    }
+                });
+                UvtState {
+                    name,
+                    lang,
+                    present: true,
+                    size: b.len() as u64,
+                    records,
+                }
+            }
+            Err(_) => UvtState {
+                name,
+                lang,
+                present: false,
+                size: 0,
+                records: None,
+            },
+        }
+    })
+}
+
+/// Synthesize the `.uvt` update-cache file from the corresponding `.vt`
+/// bytes: the pinned **204-byte FREE-container form** (the `FUN_10011e10`
+/// shape documented in v0.21.0) — the same 64-byte header (the vendor
+/// string preserved from the `.vt`, the name field set to the `.uvt`
+/// name, the `FREE` marker, `tail = 0` = no record stream) plus a 140-byte
+/// zero body. EN: what the engine would create on the first 'W' open of a
+/// base with no pending index updates (the exact initial size is not
+/// pinned by the disassembly — the 204B container is the only pinned
+/// empty-cache form).
+pub fn synth_uvt_from_vt(vt: &[u8], uvt_name: &str) -> Option<Vec<u8>> {
+    // the `.vt` must carry the FREE 64-byte header (the vendor source)
+    let _ = TridentFileHeader::parse(vt)?;
+    let mut out = vec![0u8; 0x40 + 0x8C]; // 64B header + 140B zero body
+    out[..0x18].copy_from_slice(&vt[..0x18]); // vendor
+    let nb = uvt_name.as_bytes();
+    let n = nb.len().min(0x10);
+    out[0x18..0x18 + n].copy_from_slice(&nb[..n]); // name (NUL-padded)
+    out[0x38..0x3C].copy_from_slice(b"FREE");
+    out[0x3C..0x40].copy_from_slice(&0u32.to_le_bytes()); // tail = 0
+    Some(out)
+}
+
 /// One `FUN_100134d0` tail record: a NUL-terminated key string followed
 /// by a `0x0000`-terminated u16 list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1682,6 +1774,67 @@ mod tests {
         };
         let fr = UseFile::parse(&r).expect("use file (rus)");
         assert!(fr.body_is_zero());
+    }
+
+    #[test]
+    fn synth_uvt_from_vt_produces_the_204b_container() {
+        // v0.40.0 (roadmap v0.41.0): the synthesizer models the file the
+        // engine would create on the first 'W' open — the pinned 204B
+        // FREE-container form (64B header + 140B zero body, tail = 0).
+        for (vt_name, uvt_name) in [("lmur.vt", "lmUR.uvt"), ("lmru.vt", "lmRU.uvt")] {
+            let Some(vt) = real(&format!(r"C:\Zakon.Local\Baza\SOFT\{vt_name}"))
+            else {
+                eprintln!("skipped: no base");
+                return;
+            };
+            let out = synth_uvt_from_vt(&vt, uvt_name).expect("synth");
+            assert_eq!(out.len(), 204, "the pinned 204B container size");
+            let h = TridentFileHeader::parse(&out).expect("the synth header");
+            assert_eq!(h.name, uvt_name, "the name field is patched");
+            assert_eq!(h.vendor, "Trident Soft. Inc.", "the vendor is preserved");
+            assert!(h.free);
+            assert_eq!(h.tail, 0, "an empty update cache has no record stream");
+            assert!(
+                out[0x40..].iter().all(|&b| b == 0),
+                "the 140B body is zero (the FUN_10011e10 shape)"
+            );
+        }
+        // a buffer without the FREE header is rejected (no vendor to copy)
+        assert!(synth_uvt_from_vt(&[0u8; 32], "x.uvt").is_none());
+    }
+
+    #[test]
+    fn uvt_states_reports_the_real_base_and_a_synthesized_copy() {
+        // v0.40.0: the read-only base has NO .uvt (the engine's write-mode
+        // cache was never written); a synthesized base copy has the 204B
+        // files with 0 update records.
+        let soft = std::path::Path::new(r"C:\Zakon.Local\Baza\SOFT");
+        if !soft.join("lmur.vt").is_file() {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let real_states = uvt_states(soft);
+        assert!(
+            real_states.iter().all(|s| !s.present),
+            "the read-only base never wrote the .uvt caches: {real_states:?}"
+        );
+        // the base-copy flow: synthesize into a temp SOFT\ folder
+        let dir = std::env::temp_dir().join(format!("zakon_uvt_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (vt_name, uvt_name) in [("lmur.vt", "lmUR.uvt"), ("lmru.vt", "lmRU.uvt")] {
+            let vt = real(&format!(r"C:\Zakon.Local\Baza\SOFT\{vt_name}"))
+                .expect("the real base is checked above");
+            let bytes = synth_uvt_from_vt(&vt, uvt_name).expect("synth");
+            std::fs::write(dir.join(uvt_name), bytes).unwrap();
+        }
+        let copy_states = uvt_states(&dir);
+        for s in &copy_states {
+            assert!(s.present, "{} must be present in the copy", s.name);
+            assert_eq!(s.size, 204);
+            assert_eq!(s.records, Some(0), "a never-written cache = 0 records");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

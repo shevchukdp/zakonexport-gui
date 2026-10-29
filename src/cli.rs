@@ -45,6 +45,7 @@ Usage:
           .g graph-template walker (v0.33.0: FUN_10019060 0x27-vertex/0x2d-edge markers + .gw weight map);
           exact Latin mapping (v0.34.0: latin_exact preferred-variant exact path + real-corpus .vt hit rate);
           legacy-engine parity (v0.35.0: lmsup.dll NE 16-bit no-LMaster_* vs lmsup32.dll PE32 LMaster_{{Begin,End,Lang,Tran}});
+          sub-verbs: dump <file> [off] [len] (hex dump, v0.21.0) · uvt [--synth [dir]] (v0.40.0: the .uvt write-mode update-cache status + synth on a base copy);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto] [--fetch N] [--print] [--corpus <file>]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -167,6 +168,9 @@ struct Options {
     /// tsearch: the N-query oracle corpus file (the 100-query corpus + the
     /// TridentError failure-mode table, v0.39.0)
     corpus: Option<PathBuf>,
+    /// trident uvt: synthesize the absent `.uvt` update caches on a base
+    /// copy (never the read-only base itself, v0.40.0)
+    uvt_synth: bool,
 }
 
 /// v0.26.0: the `.m` section-walker summary line for the `trident` verb
@@ -254,6 +258,7 @@ fn parse_args() -> Options {
         top_n: 10,
         print: false,
         corpus: None,
+        uvt_synth: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -401,6 +406,12 @@ fn parse_args() -> Options {
                 // corpus (the 100-query matrix + the TridentError modes)
                 o.corpus = Some(PathBuf::from(next(i).unwrap()));
                 i += 2;
+            }
+            "--synth" => {
+                // v0.40.0: `trident uvt --synth [dir]` — synthesize the
+                // absent `.uvt` update caches on a base copy
+                o.uvt_synth = true;
+                i += 1;
             }
             other => {
                 pos.push(other.to_string());
@@ -1495,6 +1506,155 @@ pub fn main_cli() {
                 }
                 return Ok(());
             }
+            // v0.40.0: the `trident uvt [--synth [dir]]` sub-verb — the
+            // engine's write-mode per-language update cache (absent in
+            // this base; `--synth` models it on a base copy, never the
+            // read-only base itself).
+            if o.positional.first().map(|s| s.as_str()) == Some("uvt") {
+                require_baza(&o)?;
+                let soft = o.baza.join("SOFT");
+                if !soft.is_dir() {
+                    println!(
+                        "В базі {} немає Trident-індексів (папки SOFT\\) — \
+                         .uvt-статус не визначено.",
+                        o.baza.display()
+                    );
+                    return Ok(());
+                }
+                let states = crate::trident_vt::uvt_states(&soft);
+                println!(
+                    "Trident .uvt (v0.40.0, roadmap v0.41.0): write-mode \
+                     per-language update cache (lmsup32.dll FUN_10015340: \
+                     lm{{lang}}.m 'R' + lm{{lang}}.uvt 'W' + lm{{lang}}.vt \
+                     'R')"
+                );
+                for s in &states {
+                    if s.present {
+                        let rec = match s.records {
+                            Some(n) => format!("{n} records"),
+                            None => "invalid FREE header".to_string(),
+                        };
+                        println!(
+                            "  {} ({}): PRESENT {} Б (parse: {rec})",
+                            s.name, s.lang, s.size
+                        );
+                    } else {
+                        println!(
+                            "  {} ({}): ABSENT (write-mode cache; the engine \
+                             opens 'W' on demand; never written in this \
+                             read-only base)",
+                            s.name, s.lang
+                        );
+                    }
+                }
+                println!(
+                    "EN: the .uvt update caches are {} — the engine opens \
+                     them 'W' only; a read-only base never fills them.",
+                    if states.iter().all(|s| !s.present) {
+                        "ABSENT in this base"
+                    } else {
+                        "present"
+                    }
+                );
+                if o.uvt_synth {
+                    let dir = o
+                        .positional
+                        .get(2)
+                        .cloned()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            PathBuf::from("C:\\temp\\opencode\\uvt_synth")
+                                .join(std::process::id().to_string())
+                        });
+                    let copy_soft = dir.join("SOFT");
+                    std::fs::create_dir_all(&copy_soft)?;
+                    // the 16-file inventory = the base copy's index set
+                    // (never the read-only base itself)
+                    for (name, _) in crate::trident::INVENTORY {
+                        let src = soft.join(name);
+                        if src.is_file() {
+                            std::fs::copy(&src, copy_soft.join(name))?;
+                        }
+                    }
+                    for (uname, lang, vname, hdr) in crate::trident_vt::UVT_LANGS {
+                        match std::fs::read(copy_soft.join(vname))
+                            .ok()
+                            .and_then(|b| crate::trident_vt::synth_uvt_from_vt(&b, hdr))
+                        {
+                            Some(bytes) => {
+                                let p = copy_soft.join(uname);
+                                std::fs::write(&p, &bytes)?;
+                                println!(
+                                    "  synth {} ({}): {} Б — 204B FREE-container \
+                                     form (64B header, name={hdr}, tail=0, \
+                                     140B zero body — the FUN_10011e10 shape)",
+                                    uname,
+                                    lang,
+                                    p.metadata().map(|m| m.len()).unwrap_or(0)
+                                );
+                            }
+                            None => println!(
+                                "  synth {} ({}): skipped ({} absent in the copy)",
+                                uname, lang, vname
+                            ),
+                        }
+                    }
+                    let after = crate::trident_vt::uvt_states(&copy_soft);
+                    for s in &after {
+                        if s.present {
+                            let rec = s
+                                .records
+                                .map(|n| format!("OK, {n} update records"))
+                                .unwrap_or_else(|| "invalid".to_string());
+                            println!("  verify {}: parse={rec}", s.name);
+                        } else {
+                            println!("  verify {}: still absent (no .vt to synthesize from)", s.name);
+                        }
+                    }
+                    println!(
+                        "  base copy: {} (the index files only; the read-only \
+                         base is untouched)",
+                        dir.display()
+                    );
+                    match (
+                        crate::trident::TridentIndex::open(&dir),
+                        crate::trident::TridentIndex::open(&o.baza),
+                    ) {
+                        (Some(ci), Some(oi)) => {
+                            let q = "не";
+                            let a = ci.search_lang(q, crate::trident::Lang::Ukr);
+                            let b = oi.search_lang(q, crate::trident::Lang::Ukr);
+                            let set = |r: &crate::trident::TridentResult| {
+                                r.joined
+                                    .iter()
+                                    .flat_map(|(_, _, u)| u.iter().copied())
+                                    .collect::<std::collections::HashSet<u16>>()
+                            };
+                            let sa = set(&a);
+                            let sb = set(&b);
+                            println!(
+                                "  tsearch «{q}» (ukr): original {} u16 == copy {} u16 — {}",
+                                sb.len(),
+                                sa.len(),
+                                if sa == sb {
+                                    "identical (the update cache is transparent to the exporter)"
+                                } else {
+                                    "DIFFER (unexpected — the .uvt must not change the search)"
+                                }
+                            );
+                            println!(
+                                "EN: synthesized on a base copy ({}); the exporter's reader ignores .uvt — search parity {}.",
+                                dir.display(),
+                                if sa == sb { "holds" } else { "BROKEN" }
+                            );
+                        }
+                        _ => println!(
+                            "  index open on the copy: FAILED (the inventory copy is incomplete)"
+                        ),
+                    }
+                }
+                return Ok(());
+            }
             // The legacy main app's native FTS indexes (SOFT\): the 16-file
             // inventory plus the parts decoded today — the windows.kod code
             // table, the lm.a case-fold tables, the dictionary records and
@@ -2036,6 +2196,7 @@ pub fn main_cli() {
                   export --trident-docs (v0.37.0: tsearch-joined native docnums -> bundle with a per-doc native-u16 evidence column; trident_docs_from_result openable resolution) \\\
                   tsearch --fetch [N] / --print (v0.38.0: top-N joined docnums -> title + first-paragraph snippet (search->docnum->document, end-to-end) / GDI printdoc; first_nonempty_line + first_body_line helpers) \\\
                   hardening + production marking (v0.39.0: 100-query oracle corpus (tsearch --corpus, ftsearch single-pass oracle_multi, corpus/trident_oracle_100.txt) + TridentError surface (NoMatch/EmptyJoin/OutOfRange, no silent empties, zero panics) + trident status line «Trident-маршрут: production (оракельно підтверджено, roadmap v0.40.0)») \\\
+                  .uvt update-cache (v0.40.0: trident uvt [--synth [dir]] — the engine's write-mode per-language update cache (lmsup32.dll FUN_10015340: lm-lang.m 'R' + lm-lang.uvt 'W' + lm-lang.vt 'R'); absent in this read-only base; --synth models the first-open file on a base copy (204B FREE-container form, tail=0, zero body) + search parity check) \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

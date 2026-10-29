@@ -120,7 +120,9 @@ zakonexport-cli fields <docnum>      # реквизиты документа
 zakonexport-cli extract <docnum>     # полный текст документа
 zakonexport-cli signal <docnum>      # найти signal-приложение (если есть)
 zakonexport-cli print  <docnum> [docnum ...]  # GDI-друк (системный диалог печати; партия)
-zakonexport-cli trident                       # инвентарь нативных FTS-индексов (SOFT\)
+zakonexport-cli trident [dump <f> [off] [len] | uvt [--synth [dir]]]
+                        # инвентарь нативных FTS-индексов (SOFT\) + sub-verbs;
+                        # uvt (v0.40.0) = .uvt write-mode update-cache status / synth
 zakonexport-cli tsearch <query> [--oracle] [--fetch N] [--print] [--corpus <file>]
                         # Trident-пошук (v0.39.0: production; --corpus = 100-запитний оракульний корпус)
 zakonexport-cli bulk [--format …] [--out dir] [--max n]
@@ -180,6 +182,30 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.40.0** — **поведення `.uvt` (roadmap v0.41.0)**: write-mode
+  per-language update cache (рушій відкриває `lm{lang}.uvt` лише на
+  запис; у read-only базі файл відсутній). Новий sub-verb
+  `trident uvt [--synth [dir]]`: per-language статус `.uvt` (ABSENT/
+  PRESENT + parse) + `--synth` — синтез відсутніх `.uvt` **на копії
+  бази** (16-файловий inventory → `<dir>\SOFT\`; pinned 204B
+  FREE-container form: 64B header з vendor + name lmUR.uvt/lmRU.uvt +
+  tail=0 + 140B zero body — форма FUN_10011e10) + verify (parse 0
+  records + `TridentIndex::open` на копії + search parity:
+  `tsearch «не»` оригінал == копія, 967 u16 == 967 u16). Rust:
+  `UVT_LANGS` + `UvtState`/`uvt_states()` + `synth_uvt_from_vt()`
+  (`trident_vt.rs`), 202 юніт-тести. /
+  **`.uvt` behavior (roadmap v0.41.0):** the write-mode per-language
+  update cache (the engine opens `lm{lang}.uvt` for writing only; the
+  file is absent in the read-only base). New sub-verb `trident uvt
+  [--synth [dir]]`: the per-language `.uvt` status (ABSENT/PRESENT +
+  parse) + `--synth` — synthesizes the absent `.uvt` caches **on a base
+  copy** (the 16-file inventory → `<dir>\SOFT\`; the pinned 204B
+  FREE-container form: the 64B header with the vendor + the lmUR.uvt/
+  lmRU.uvt name + tail=0 + the 140B zero body — the FUN_10011e10
+  shape) + verify (parse 0 records + `TridentIndex::open` on the copy +
+  search parity: `tsearch «не»` original == copy, 967 u16 == 967 u16).
+  Rust: `UVT_LANGS` + `UvtState`/`uvt_states()` +
+  `synth_uvt_from_vt()` (`trident_vt.rs`), 202 unit tests.
 - **v0.39.0** — **hardening + production marking (roadmap v0.40.0)**:
   100-запитний оракульний корпус (`corpus/trident_oracle_100.txt`,
   `tsearch --corpus <file>` — повна tsearch-ланцюга vs ftsearch-оракула,

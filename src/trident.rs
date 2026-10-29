@@ -1682,6 +1682,65 @@ mod tests {
     }
 
     #[test]
+    fn uvt_synth_base_copy_search_parity() {
+        // v0.40.0 (roadmap v0.41.0): synthesize the absent `.uvt`
+        // update caches on a BASE COPY (the index files only, never the
+        // read-only base) and prove the exporter's read path is
+        // unaffected: the join on the copy must equal the join on the
+        // original.
+        let baza = Path::new(r"C:\Zakon.Local\Baza");
+        if !TridentIndex::is_available(baza) {
+            eprintln!("skipped: no base");
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("zakon_uvt_parity_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let copy_soft = dir.join("SOFT");
+        std::fs::create_dir_all(&copy_soft).unwrap();
+        // the 16-file inventory = the base copy's index set
+        for (name, _) in INVENTORY {
+            let src = baza.join("SOFT").join(name);
+            if src.is_file() {
+                std::fs::copy(&src, copy_soft.join(name)).unwrap();
+            }
+        }
+        // synthesize the .uvt caches from the copy's own .vt files
+        for (uname, _lang, vname, hdr) in crate::trident_vt::UVT_LANGS {
+            let vt = std::fs::read(copy_soft.join(vname)).expect("the .vt was copied");
+            let bytes = crate::trident_vt::synth_uvt_from_vt(&vt, hdr)
+                .expect("synth from the real .vt header");
+            std::fs::write(copy_soft.join(uname), bytes).unwrap();
+        }
+        let states = crate::trident_vt::uvt_states(&copy_soft);
+        assert!(
+            states.iter().all(|s| s.present && s.records == Some(0)),
+            "the synthesized caches parse as empty (0 update records): {states:?}"
+        );
+        // the exporter's reader ignores .uvt — the index opens on the copy
+        let copy_idx = TridentIndex::open(&dir).expect("the copy's index loads");
+        let orig_idx = TridentIndex::open(baza).expect("the original index loads");
+        for q in ["не", "зак"] {
+            let a = copy_idx.search_lang(q, Lang::Ukr);
+            let b = orig_idx.search_lang(q, Lang::Ukr);
+            let set = |r: &TridentResult| {
+                r.joined
+                    .iter()
+                    .flat_map(|(_, _, u)| u.iter().copied())
+                    .collect::<std::collections::HashSet<u16>>()
+            };
+            let sa = set(&a);
+            let sb = set(&b);
+            assert!(!sa.is_empty(), "«{q}» joins into the .vt stream");
+            assert_eq!(
+                sa, sb,
+                "«{q}»: the .uvt update cache must not change the search"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn legacy_engine_parity_ne_vs_pe32_dlls() {
         // v0.35.0 (roadmap v0.36.0): the two "engines" are different image
         // formats — lmsup.dll is a 16-bit NE (New Executive) image, and

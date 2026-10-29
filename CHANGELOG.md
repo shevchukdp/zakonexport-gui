@@ -16,6 +16,99 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.38.0 — 2026-10-29
+
+### UK
+- **`tsearch --fetch [N]` / `tsearch --print` (roadmap v0.39.0).** `tsearch`
+  тепер замикає ланцюг «пошук → docnum → документ» в одному слові:
+  - **`--fetch N`** (top-N, за замовчуванням 10) — розв'язує openable
+    docnums (через `trident_docs_from_result`, v0.37.0) і для кожного
+    друкують **title + перший абзац** через наявний `db.rs`/`render::Base`
+    docnum-шлях (`base.doc_text` + `fields::parse`):
+    - `cli.rs` — блок `--fetch` у слові `tsearch`: `top-{n} з {к-ть}
+      openable docnum (→ title + перший абзац)` + рядки
+      `[<docnum>] <title>` + `…<snip>`.
+    - Нові хелпери **`first_nonempty_line`** (title fallback) +
+      **`first_body_line`** (перший абзац, обмежено 160 зн.).
+  - **`--print`** — GDI printdoc top-N joined docnums (системний діалог
+    друку, `crate::printdoc::print_text`), ті ж docnums, формат як у слові
+    `print` (v0.31.0): `f.display()` + текст.
+  - Обидва прапорці беруть `docnums` з `r.joined` → openable subset
+    (`0 < u16 ≤ doc_count`), тому працюють тоді й лише тоді, коли точний
+    stem-join щось знайшов (та сама поведінка, що в `tsearch` без прапорців).
+- **10-query manual check (UA+EN, DoD).** `tsearch --fetch 2` на реальній
+  базі (`C:\Zakon.Local\Baza`, 613173 docnums):
+
+  | запит | openable docnum | перший title (docnum) |
+  |---|---|---|
+  | не | 967 | [258] Про умови оплати праці працівників |
+  | пере | 622 | [281] Про День художника |
+  | по | 1299 | [257] Про представників Кабінету Міністрів України |
+  | спів | 0 | — (стем не в `.vt`, packed-B-tree gap) |
+  | зак | 521 | [260] Про передачу до сфери управління Міністерства з |
+  | розп | 266 | [534] Про стан виконання антикризових заходів |
+  | заст | 0 | — |
+  | розк | 0 | — |
+  | про | 198 | [468] НАЦІОНАЛЬНИЙ БАНК УКРАЇНИ |
+  | бук | 0 | — |
+
+  **6/10** запитів (stem/префікси, присутні в `.vt`-стрімі) розв'язуються
+  в коректно читабельні юридичні titli; **4/10** — це задокументований
+  packed-B-tree gap (повне word-set, куди живе «конституція» — не raw
+  byte-run в `lmu.voc`, далі). EN: 6/10 stem/prefix queries resolve to
+  correctly-reading legal titles; 4/10 are the documented packed-B-tree gap.
+- **194 юніт-тестів** (нові 2: `first_nonempty_line_skips_blank_leading_lines`
+  + `first_body_line_is_the_second_nonempty_line_capped`). Guitest baseline
+  `rows=430` без змін. Версія **0.37.0 → 0.38.0**.
+- Далі (v0.39.0 / roadmap v0.40.0): hardening + production marking
+  (100-query oracle corpus, `TridentError`, production status).
+
+### EN
+- **`tsearch --fetch [N]` / `tsearch --print` (roadmap v0.39.0).** `tsearch`
+  now closes the "search → docnum → document" chain in one verb:
+  - **`--fetch N`** (top-N, default 10) — resolves the openable docnums
+    (via `trident_docs_from_result`, v0.37.0) and, for each, prints a
+    **title + first paragraph** via the existing `db.rs`/`render::Base`
+    docnum path (`base.doc_text` + `fields::parse`):
+    - `cli.rs` — a `--fetch` block in the `tsearch` verb: `top-{n} of {count}
+      openable docnums (→ title + first paragraph)` + `[<docnum>] <title>` +
+      `…<snippet>` lines.
+    - New helpers **`first_nonempty_line`** (title fallback) +
+      **`first_body_line`** (first paragraph, capped to 160 chars).
+  - **`--print`** — a GDI printdoc of the top-N joined docnums (the system
+    print dialog, `crate::printdoc::print_text`), the same docnums, formatted
+    like the `print` verb (v0.31.0): `f.display()` + the text.
+  - Both flags take the docnums from `r.joined` → the openable subset
+    (`0 < u16 ≤ doc_count`), so they work exactly when the exact stem-join
+    finds something (the same behaviour as `tsearch` without the flags).
+- **10-query manual check (UA+EN, DoD).** `tsearch --fetch 2` on the real
+  base (`C:\Zakon.Local\Baza`, 613173 docnums):
+
+  | query | openable docnums | first title (docnum) |
+  |---|---|---|
+  | не | 967 | [258] Про умови оплати праці працівників |
+  | пере | 622 | [281] Про День художника |
+  | по | 1299 | [257] Про представників Кабінету Міністрів України |
+  | спів | 0 | — (stem not in `.vt`, packed-B-tree gap) |
+  | зак | 521 | [260] Про передачу до сфери управління Міністерства з |
+  | розп | 266 | [534] Про стан виконання антикризових заходів |
+  | заст | 0 | — |
+  | розк | 0 | — |
+  | про | 198 | [468] НАЦІОНАЛЬНИЙ БАНК УКРАЇНИ |
+  | бук | 0 | — |
+
+  **6/10** queries (stems/prefixes present in the `.vt` stream) resolve to
+  correctly-reading legal titles; **4/10** are the documented packed-B-tree
+  gap (the full word set, where «конституція» lives — not a raw byte run in
+  `lmu.voc`; deferred).
+- **194 unit tests** (2 new: `first_nonempty_line_skips_blank_leading_lines`
+  + `first_body_line_is_the_second_nonempty_line_capped`). The guitest
+  baseline `rows=430` is unchanged. Version **0.37.0 → 0.38.0**.
+- Next (v0.39.0 / roadmap v0.40.0): hardening + production marking (a
+  100-query oracle corpus, `TridentError`, the production status line).
+
+---
+
 ## v0.37.0 — 2026-10-29
 
 ### UK

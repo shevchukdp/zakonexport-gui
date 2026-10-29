@@ -46,14 +46,17 @@ Usage:
           exact Latin mapping (v0.34.0: latin_exact preferred-variant exact path + real-corpus .vt hit rate);
           legacy-engine parity (v0.35.0: lmsup.dll NE 16-bit no-LMaster_* vs lmsup32.dll PE32 LMaster_{{Begin,End,Lang,Tran}});
           search via tsearch — experimental)
-  zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto]
+  zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto] [--fetch N] [--print]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
           or the Russian lmr.voc + lmru.vt) — the legacy main app's engine.
           Document numbers are native 2005-era Trident u16 ids; the
           doc-number join is probed (v0.23.0). --oracle cross-checks the
           exact join against the ftsearch oracle (per-term count agreement,
           v0.24.0); --lang r|auto runs the language-generic loader over the
-          Russian streams (v0.25.0)
+          Russian streams (v0.25.0); --fetch N (v0.38.0) resolves the
+          joined native docnums into top-N title + first-paragraph snippets
+          (search->docnum->document, end-to-end), --print GDI-prints the
+          top-N joined docs
   zakonexport-cli ftsearch <query>  full-text scan of the base's `.mb`
           document files (case-insensitive exact word — the legacy app's
           oracle mechanism); reports (file @ offset) hits like the oracle,
@@ -152,6 +155,13 @@ struct Options {
     /// export: run the native tsearch join and export the resolved docnums
     /// with a per-doc native-u16 evidence column (v0.37.0)
     trident_docs: bool,
+    /// tsearch: fetch the top-N joined docnums into title + first-paragraph
+    /// snippet (the search→docnum→document chain, v0.38.0)
+    fetch: bool,
+    /// tsearch: the top-N cap for `--fetch` / `--print` (default 10)
+    top_n: usize,
+    /// tsearch: GDI printdoc of the top-N joined docnums (v0.38.0)
+    print: bool,
 }
 
 /// v0.26.0: the `.m` section-walker summary line for the `trident` verb
@@ -235,6 +245,9 @@ fn parse_args() -> Options {
         oracle: false,
         lang: String::from("u"),
         trident_docs: false,
+        fetch: false,
+        top_n: 10,
+        print: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -361,6 +374,20 @@ fn parse_args() -> Options {
             }
             "--trident-docs" => {
                 o.trident_docs = true;
+                i += 1;
+            }
+            "--fetch" => {
+                // v0.38.0: `tsearch --fetch [N]` — an optional top-N cap
+                o.fetch = true;
+                if let Some(n) = next(i).filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())) {
+                    o.top_n = n.parse().unwrap_or(10);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--print" => {
+                o.print = true;
                 i += 1;
             }
             other => {
@@ -793,6 +820,29 @@ fn print_hit(idx: usize, hit: &db::Hit, f: Option<&fields::DocFields>) {
 fn fields_of(base: &render::Base, baza: &Path, docnum: u32) -> fields::DocFields {
     let text = base.doc_text(baza, docnum).unwrap_or_default();
     fields::parse(docnum, &text)
+}
+
+/// v0.38.0: the first non-empty line of a document body (a readable title
+/// fallback for `tsearch --fetch`).
+fn first_nonempty_line(t: &str) -> String {
+    t.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string()
+}
+
+/// v0.38.0: the first non-empty *body* line after the document's leading line
+/// — the `tsearch --fetch` first-paragraph snippet, capped to 160 chars.
+/// Returns an empty string when the body has at most one non-empty line.
+fn first_body_line(t: &str) -> String {
+    let mut seen = 0usize;
+    for l in t.lines() {
+        if l.trim().is_empty() {
+            continue;
+        }
+        seen += 1;
+        if seen == 2 {
+            return l.trim().chars().take(160).collect();
+        }
+    }
+    String::new()
 }
 
 /// Full numbered result list with per-doc fields, written as UTF-8
@@ -1764,6 +1814,7 @@ pub fn main_cli() {
                   v0.35.0: legacy-engine parity (lmsup.dll NE 16-bit New Executive no LMaster_* vs lmsup32.dll PE32 x86 0x14c LMaster_{{Begin,End,Lang,Tran}}; repaired dump_dll_exports.cjs). \\\
                   GUI Trident panel (v0.36.0: separate modal window reusing TridentIndex + lmcode_hex; tsearch chain query->LmCode->candidate->.vt@off->docnums; guitest trident= marker) \\\
                   export --trident-docs (v0.37.0: tsearch-joined native docnums -> bundle with a per-doc native-u16 evidence column; trident_docs_from_result openable resolution) \\\
+                  tsearch --fetch [N] / --print (v0.38.0: top-N joined docnums -> title + first-paragraph snippet (search->docnum->document, end-to-end) / GDI printdoc; first_nonempty_line + first_body_line helpers) \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())
@@ -2048,6 +2099,77 @@ pub fn main_cli() {
                     println!("    … (ще {})", r.docs.len() - 40);
                 }
             }
+            // v0.38.0 (roadmap v0.39.0): --fetch [N] — top-N joined docnums ->
+            // title + first-paragraph snippet (the search->docnum->document
+            // chain, end-to-end via the db.rs docnum path)
+            if o.fetch {
+                let n = if o.top_n == 0 { 10 } else { o.top_n };
+                let (mut docnums, _ev) =
+                    crate::trident::trident_docs_from_result(&r, doc_count);
+                docnums.sort();
+                if docnums.is_empty() {
+                    println!(
+                        "\n--fetch: жодного openable docnum (≤ {doc_count} docnum) для «{q}» — текст недоступний"
+                    );
+                } else if let Ok(base) = render::Base::load(&o.baza) {
+                    println!(
+                        "\n--fetch: top-{n} з {} openable docnum (→ title + перший абзац):",
+                        docnums.len()
+                    );
+                    for &dn in docnums.iter().take(n) {
+                        let text = base.doc_text(&o.baza, dn).unwrap_or_default();
+                        let f = fields::parse(dn, &text);
+                        let title = f
+                            .title
+                            .clone()
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or_else(|| first_nonempty_line(&text));
+                        let snippet = first_body_line(&text);
+                        println!("\n[{dn}] {title}");
+                        if !snippet.is_empty() {
+                            println!("    …{snippet}");
+                        }
+                    }
+                    if docnums.len() > n {
+                        println!("\n    … (ще {} docnum)", docnums.len() - n);
+                    }
+                } else {
+                    eprintln!("\n--fetch: базу не вдалося завантажити для тексту (docnums віддано без тексту)");
+                }
+            }
+            // v0.38.0: --print — GDI printdoc of the top-N joined docnums
+            if o.print {
+                let n = if o.top_n == 0 { 10 } else { o.top_n };
+                let (mut docnums, _ev) =
+                    crate::trident::trident_docs_from_result(&r, doc_count);
+                docnums.sort();
+                if docnums.is_empty() {
+                    println!("\n--print: жодного openable docnum (≤ {doc_count} docnum) для «{q}»");
+                } else if let Ok(base) = render::Base::load(&o.baza) {
+                    println!(
+                        "\n--print: GDI друк top-{n} з {} openable docnum (системний діалог друку):",
+                        docnums.len()
+                    );
+                    for &dn in docnums.iter().take(n) {
+                        let text = base.doc_text(&o.baza, dn).unwrap_or_default();
+                        let f = fields::parse(dn, &text);
+                        let full = format!("{}\n\n{}", f.display(), text);
+                        match crate::printdoc::print_text(&format!("Документ {dn}"), &full) {
+                            Ok(crate::printdoc::PrintOutcome::Sent) => {
+                                println!("doc {dn}: завдання друку надіслано в принтер");
+                            }
+                            Ok(crate::printdoc::PrintOutcome::Cancelled) => {
+                                println!("doc {dn}: друк відмінено");
+                            }
+                            Err(e) => {
+                                eprintln!("doc {dn}: помилка друку: {e}");
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("\n--print: базу не вдалося завантажити для друку");
+                }
+            }
             Ok(())
         })(),
         "ftsearch" => (|| {
@@ -2096,5 +2218,34 @@ pub fn main_cli() {
     if let Err(e) = r {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_nonempty_line_skips_blank_leading_lines() {
+        assert_eq!(first_nonempty_line("  \n\t\nЗАГОЛОВИЙ\n"), "ЗАГОЛОВИЙ");
+        assert_eq!(first_nonempty_line(""), "");
+        // the second line is returned when the first is blank
+        assert_eq!(first_nonempty_line("\n\nА Б В"), "А Б В");
+    }
+
+    #[test]
+    fn first_body_line_is_the_second_nonempty_line_capped() {
+        // the second non-empty line is the snippet body (the first is the
+        // title-ish line)
+        assert_eq!(first_body_line("ЗАГОЛОВИЙ\n\nТіло першого абзацу"), "Тіло першого абзацу");
+        // two consecutive non-empty lines: the second is the body
+        assert_eq!(first_body_line("ЗАГ\nТІЛО"), "ТІЛО");
+        // at most one non-empty line -> no body
+        assert_eq!(first_body_line("ЗАГ"), "");
+        // the snippet is capped at 160 chars
+        let long: String = "А".repeat(300);
+        let body = "ЗАГ\n".to_owned() + &long;
+        let b = first_body_line(&body);
+        assert_eq!(b.chars().count(), 160, "the body line is capped to 160 chars");
     }
 }

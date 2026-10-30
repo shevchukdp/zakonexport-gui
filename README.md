@@ -182,6 +182,33 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.42.0** — **GUI: native-id export button (roadmap v0.43.0)**:
+  Trident-панель (окреме модальне вікно) тепер **експортує** — новий
+  кнопа **«Експорт (native-id)»** запускає шлях `--trident-docs` (v0.37.0)
+  з GUI: запит + база з панелі → tsearch stem-join → openable native
+  u16 docnums → md-бандл, де **кожен документ несе рядок
+  native-id-довідки** (`нативні u16 (Trident): cand@0x…`). Один
+  pipeline без дублювання: спільна `writers::trident_docs_bundle()`
+  (join → openable docnums → бандл + evidence-колонка; `TridentBundle`
+  — лічильники + папка) виконує і CLI `export --trident-docs` (live:
+  «не» → 32 record-ів · 2372 openable u16 → 967 docnum → 967 файлів),
+  і GUI-кнопу (md, auto-lang, воркер-потік + окремий `trident_rx`-канал
+  + `trident_busy`-захист + log у результатне поле панелі; panel —
+  separate window → rows=430 untouched). / **The GUI native-id export
+  button (roadmap v0.43.0):** the Trident panel (the separate modal
+  window) now **exports** — the new **«Експорт (native-id)»** button
+  runs the `--trident-docs` path (v0.37.0) from the GUI: the panel's
+  query + base → the tsearch stem-join → the openable native u16
+  docnums → an md bundle where **every document carries its native-id
+  evidence line** (`нативні u16 (Trident): cand@0x…`). One pipeline,
+  no duplication: the shared `writers::trident_docs_bundle()`
+  (join → openable docnums → the bundle + the evidence column;
+  `TridentBundle` — the counters + the output dir) now serves both the
+  CLI verb (live: «не» → 32 records · 2372 openable u16 → 967 docnums
+  → 967 files) and the GUI button (md, auto-lang, a worker thread + a
+  dedicated `trident_rx` channel + the `trident_busy` guard + the log
+  lines in the panel's result box; the panel is a separate window →
+  rows=430 untouched). 211 unit tests.
 - **v0.41.0** — **Rust `LMaster_*` driver (roadmap v0.42.0)**: FFI-facade
 для `lmsup32.dll` (32-бітний PE32 0x14c — 64-бітний процес не може
 LoadLibrary-ти його, err 126): **32-бітний helper**

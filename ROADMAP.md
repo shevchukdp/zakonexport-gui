@@ -599,6 +599,45 @@ recorded (100 queries · 13 with docs · 8176 distinct u16); release
 v0.41.0 (bilingual CHANGELOG + `changes.md` in `releases/v0.41.0/`,
 console-only, the 4th asset = the i686 helper); guitest rows=430.
 
+## v0.43.0 — GUI native-id export button (the `--trident-docs` path)
+
+**Pitch.** Close the loop in the GUI: the Trident search panel
+(v0.36.0) showed the tsearch chain but stopped at the docnums — add
+the missing export step (UA+EN): a native-id export button in the
+panel that runs the `--trident-docs` path (v0.37.0) end-to-end: the
+panel's query + base → the tsearch stem-join → the openable native
+u16 docnums → an md bundle where every document carries its
+native-id evidence line.
+
+**Evidence.** The CLI path already proves the pipeline (v0.37.0):
+live on the real base, «не» → 32 joined `.vt` records · 2372
+openable u16 → 967 docnums → 967 exported files, each with the
+`нативні u16 (Trident): cand@0x…` evidence line. The GUI button is
+the same pipeline with the panel's fields as inputs.
+
+**Rust surface.** One pipeline, no duplication: the shared
+`writers::trident_docs_bundle()` (join → openable docnums → the
+bundle with the evidence column) now serves both the CLI `export
+--trident-docs` verb (refactored onto it) and the new GUI button.
+`TridentBundle` carries the counters (joined / openable / dropped /
+missing / exported / attached) + the output dir. The GUI wiring:
+the `trident_export_btn` in the panel, a worker thread (the base
+load + render never block the UI), a dedicated `trident_rx` channel
+(the main-window workers replace `rx`, so the panel's worker must
+not lose its completion), the `trident_busy` re-entrance guard, and
+the log lines in the panel's result box. The panel is a separate
+window, so the guitest `rows=430` baseline holds.
+
+**Effort:** M.
+
+**Definition of done.** The CLI refactor is behavior-preserving
+(live check on the real base); the button runs the path in a worker
+thread and logs to the panel box; the new real-base unit test
+asserts the evidence line in every exported document; release
+v0.42.0 (bilingual CHANGELOG + `changes.md` in
+`releases/v0.42.0/`, console-only, the 3-asset flow resumes);
+guitest rows=430.
+
 ### Beyond v0.40.0 (sketches, not scheduled)
 
 - v0.41.0 — `.uvt` behavior: the engine's write-mode per-language update

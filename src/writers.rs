@@ -168,6 +168,148 @@ pub fn export_hits(
     Ok((exported, attached, dir))
 }
 
+// ============================================================
+// the shared `--trident-docs` pipeline (v0.42.0, roadmap v0.43.0)
+// ============================================================
+//
+// One join-to-bundle path, no duplication: the CLI `export --trident-docs`
+// verb and the GUI's Trident-panel export button (roadmap v0.43.0) both run
+// it — the tsearch stem-join over the native `.vt` records, the openable
+// native u16 docnums (the 2005-era ids mapped into this base's docnum
+// space), and the export bundle with the per-doc native-id evidence column.
+
+/// The `--trident-docs` pipeline's counters + the written bundle (v0.42.0).
+#[derive(Debug)]
+pub struct TridentBundle {
+    /// the joined `.vt` records in the search result
+    pub joined_records: usize,
+    /// the native u16 ids that map into this base's docnum space
+    pub openable_u16: usize,
+    /// the u16 ids wider than this base's docnum space (2005-era)
+    pub dropped_u16: usize,
+    /// docnums whose span could not be resolved (unrenderable documents)
+    pub missing: Vec<u32>,
+    /// the documents actually written
+    pub exported: usize,
+    /// the attachments copied
+    pub attached: usize,
+    /// the export folder
+    pub out: std::path::PathBuf,
+}
+
+/// Run the `--trident-docs` path (v0.42.0, roadmap v0.43.0): the tsearch
+/// stem-join → the openable native u16 docnums → an export bundle where
+/// every document carries its **native-id evidence** line (the join
+/// candidates + the `.vt` record offsets that produced that docnum).
+///
+/// `auto_lang`/`rus_lang` mirror the CLI's `--lang u|r|auto` exactly (the
+/// GUI button calls with `auto_lang = true`). EN: the single
+/// join-to-bundle path shared by the CLI verb and the GUI panel button.
+pub fn trident_docs_bundle(
+    baza: &Path,
+    query: &str,
+    auto_lang: bool,
+    rus_lang: bool,
+    naming: &crate::naming::Naming,
+    format: &str,
+    single: bool,
+    attach: bool,
+    hl: &Hl,
+    progress: Option<&dyn Fn(usize, usize)>,
+) -> Result<TridentBundle> {
+    let Some(idx) = crate::trident::TridentIndex::open(baza) else {
+        anyhow::bail!(
+            "у базі {} немає робочого Trident-індексу (SOFT\\lmu.voc + lmur.vt) — \
+             --trident-docs недоступний",
+            baza.display()
+        );
+    };
+    // respect the language exactly like the CLI verb
+    let r = if auto_lang {
+        idx.search_auto(query)
+    } else {
+        let l = if rus_lang {
+            crate::trident::Lang::Rus
+        } else {
+            crate::trident::Lang::Ukr
+        };
+        idx.search_lang(query, l)
+    };
+    if r.joined.is_empty() {
+        anyhow::bail!(
+            "точний stem-join не знайшов record-ів «.vt» для «{query}» — \
+             жодного native docnum"
+        );
+    }
+    let base = crate::render::Base::load(baza)?;
+    let doc_count = base.doc_count();
+    // the openable / dropped counters: the native u16 space maps to current
+    // docnums when `u16 <= doc_count` (the Identity join kind, v0.23.0)
+    let mut openable = 0usize;
+    let mut dropped = 0usize;
+    for (_, _, u16s) in &r.joined {
+        for &u in u16s {
+            if u == 0 {
+                continue;
+            }
+            if (u as u32) > doc_count {
+                dropped += 1;
+            } else {
+                openable += 1;
+            }
+        }
+    }
+    // the resolved docnums (the openable native u16 ids) + the per-doc evidence
+    let (docnums, ev) = crate::trident::trident_docs_from_result(&r, doc_count);
+    if ev.is_empty() {
+        anyhow::bail!(
+            "усі native u16 поза межами бази (≤ {doc_count} docnum) — \
+             нічого експортувати"
+        );
+    }
+    // the resolved docnums -> hits (the openable native u16 ids)
+    let mut hits: Vec<crate::db::Hit> = Vec::new();
+    let mut missing: Vec<u32> = Vec::new();
+    for dn in docnums {
+        match base.span(dn) {
+            Ok((_, _, file)) => hits.push(crate::db::Hit {
+                docnum: dn,
+                file: format!("{file}.mb"),
+                match_off: 0,
+                matches: 1,
+                title: String::new(),
+            }),
+            Err(_) => missing.push(dn),
+        }
+    }
+    if hits.is_empty() {
+        anyhow::bail!("жодного docnum не рендериться в базі");
+    }
+    // the per-doc native-id evidence column: docnum -> "cand@0x…, cand@0x…"
+    let mut evidence: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    for (dn, mut items) in ev {
+        items.sort_by_key(|(c, o)| (c.clone(), *o));
+        items.dedup();
+        let s = items
+            .iter()
+            .map(|(c, off)| format!("{c}@0x{off:x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        evidence.insert(dn, s);
+    }
+    let (exported, attached, out) =
+        export_hits(baza, &hits, format, naming, progress, attach, single, hl, Some(&evidence))?;
+    Ok(TridentBundle {
+        joined_records: r.joined.len(),
+        openable_u16: openable,
+        dropped_u16: dropped,
+        missing,
+        exported,
+        attached,
+        out,
+    })
+}
+
 /// Requisites header block — the same content the GUI preview shows:
 /// the document title plus every DocFields::display() line and the
 /// container file name.
@@ -1383,5 +1525,55 @@ mod tests {
         // line is a header line, bodies are untouched here; check no <mark>
         assert!(!s.contains("<mark>"), "no body match expected: {s}");
         let _ = std::fs::remove_file(p);
+    }
+
+    /// (v0.42.0, roadmap v0.43.0) the shared `--trident-docs` pipeline on
+    /// the real trident base: the tsearch stem-join → the openable native
+    /// u16 docnums → a markdown bundle where EVERY document carries the
+    /// per-doc native-id evidence line. Skipped when the base is absent.
+    #[test]
+    fn trident_docs_bundle_exports_the_native_evidence_line() {
+        let baza = std::path::Path::new(r"C:\Zakon.Local\Baza");
+        if !baza.join(r"SOFT\lmu.voc").is_file() {
+            eprintln!("trident bundle test: skipped (no trident base)");
+            return;
+        }
+        let tmp = std::path::Path::new(r"C:\temp\opencode\trident_bundle_test");
+        let _ = std::fs::remove_dir_all(tmp);
+        let mut naming = crate::naming::Naming::load(baza);
+        naming.out_dir = tmp.to_string_lossy().into_owned();
+        let b = trident_docs_bundle(
+            baza,
+            "не",
+            true,
+            false,
+            &naming,
+            "md",
+            false,
+            false,
+            &Hl::default(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("trident bundle «не»: {e:#}"));
+        // «не» joins on the real base (the v0.40.0 parity fact: 967 u16)
+        let exported = b.exported;
+        assert!(exported > 0, "the join must write at least one document");
+        assert!(b.openable_u16 > 0, "some u16 must fit the base's docnum space");
+        // EVERY exported document carries the native-id evidence line
+        let mut with_ev = 0usize;
+        for entry in std::fs::read_dir(&b.out).unwrap() {
+            let p = entry.unwrap().path();
+            if p.extension().map(|e| e == "md").unwrap_or(false) {
+                let s = std::fs::read_to_string(&p).unwrap_or_default();
+                if s.contains("нативні u16 (Trident): ") {
+                    with_ev += 1;
+                }
+            }
+        }
+        assert_eq!(
+            with_ev, exported,
+            "each of the {exported} document(s) must carry the evidence line ({with_ev} do)"
+        );
+        let _ = std::fs::remove_dir_all(tmp);
     }
 }

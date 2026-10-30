@@ -795,124 +795,46 @@ fn trident_corpus_run(o: &Options, path: &Path) -> Result<()> {
 /// Closes the loop from `tsearch` (search) to the export bundle. EN: export
 /// the tsearch-joined docnums with the native-u16 evidence line.
 fn trident_docs_export(o: &Options, q: &str) -> Result<()> {
-    let Some(idx) = crate::trident::TridentIndex::open(&o.baza) else {
-        bail!(
-            "у базі {} немає робочого Trident-індексу (SOFT\\lmu.voc + lmur.vt) — \
-             --trident-docs недоступний",
-            o.baza.display()
-        );
-    };
-    // respect --lang (u default / r / auto) exactly like the tsearch verb
+    // respect --lang (u default / r / auto) exactly like the tsearch verb;
+    // the pipeline itself is the shared writers::trident_docs_bundle
+    // (v0.42.0 — the GUI panel button runs the same function)
     let auto = matches!(o.lang.as_str(), "auto" | "both");
     let rus = matches!(o.lang.as_str(), "r" | "rus" | "рус");
-    let r = if auto {
-        idx.search_auto(q)
-    } else {
-        let l = if rus {
-            crate::trident::Lang::Rus
-        } else {
-            crate::trident::Lang::Ukr
-        };
-        idx.search_lang(q, l)
-    };
-    if r.joined.is_empty() {
-        eprintln!(
-            "--trident-docs: точний stem-join не знайшов record-ів «.vt» для \
-             «{q}» — жодного native docnum"
-        );
-        bail!("--trident-docs: join порожній (жодного docnum для експорту)");
-    }
-    let base = render::Base::load(&o.baza)?;
-    let doc_count = base.doc_count();
-    // the openable / dropped counters (for the log line): the native u16
-    // space maps to current docnums when `u16 <= doc_count` (the openable
-    // subset; the Identity/Bounded join kind, v0.23.0)
-    let mut openable = 0usize;
-    let mut dropped = 0usize;
-    for (_, _, u16s) in &r.joined {
-        for &u in u16s {
-            if u == 0 {
-                continue;
-            }
-            if (u as u32) > doc_count {
-                dropped += 1;
-            } else {
-                openable += 1;
-            }
-        }
-    }
-    // the resolved docnums (openable native u16 ids) + the per-doc evidence
-    let (docnums, ev) = crate::trident::trident_docs_from_result(&r, doc_count);
-    if ev.is_empty() {
-        eprintln!(
-            "--trident-docs: усі native u16 поза межами бази (≤ {doc_count} docnum) — \
-             нічого експортувати"
-        );
-        bail!("--trident-docs: жодного openable docnum (усі u16 > {doc_count})");
-    }
-    // the resolved docnums (the openable native u16 ids) -> hits
-    let mut hits: Vec<db::Hit> = Vec::new();
-    let mut missing: Vec<u32> = Vec::new();
-    for dn in docnums {
-        match base.span(dn) {
-            Ok((_, _, file)) => hits.push(db::Hit {
-                docnum: dn,
-                file: format!("{file}.mb"),
-                match_off: 0,
-                matches: 1,
-                title: String::new(),
-            }),
-            Err(_) => missing.push(dn),
-        }
-    }
-    if hits.is_empty() {
-        bail!("--trident-docs: жодного docnum не рендериться в базі");
-    }
-    if !missing.is_empty() {
-        let shown: Vec<String> = missing.iter().take(12).map(|x| x.to_string()).collect();
-        let more = if missing.len() > 12 { " …" } else { "" };
-        eprintln!("--trident-docs: недоступні docnum (span-помилка): {}{more}", shown.join(", "));
-    }
-    // the per-doc native-id evidence column: docnum -> "cand@0x…, cand@0x…"
-    let mut evidence: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    for (dn, mut items) in ev {
-        items.sort_by_key(|(c, o)| (c.clone(), *o));
-        items.dedup();
-        let s = items
-            .iter()
-            .map(|(c, off)| format!("{c}@0x{off:x}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        evidence.insert(dn, s);
-    }
-    eprintln!(
-        "--trident-docs: join {} record-ів · openable u16 {openable} → {} docnum \
-         ({} поза межами ≤{doc_count})",
-        r.joined.len(),
-        hits.len(),
-        dropped
-    );
     let naming = resolve_naming(&o);
     let hl = if o.hl {
         crate::highlight::Hl::from_query(q)
     } else {
         crate::highlight::Hl::default()
     };
-    let (n, a, out) =
-        writers::export_hits(
-            &o.baza,
-            &hits,
-            &o.format,
-            &naming,
-            Some(&|d, t| {
-                eprint!("\rexport {d}/{t}  ");
-                let _ = std::io::stderr().flush();
-            }),
-            o.attach,
-            o.single,
-            &hl,
-            Some(&evidence),
-        )?;
+    let b = writers::trident_docs_bundle(
+        &o.baza,
+        q,
+        auto,
+        rus,
+        &naming,
+        &o.format,
+        o.single,
+        o.attach,
+        &hl,
+        Some(&|d, t| {
+            eprint!("\rexport {d}/{t}  ");
+            let _ = std::io::stderr().flush();
+        }),
+    )?;
+    if !b.missing.is_empty() {
+        let shown: Vec<String> = b.missing.iter().take(12).map(|x| x.to_string()).collect();
+        let more = if b.missing.len() > 12 { " …" } else { "" };
+        eprintln!("--trident-docs: недоступні docnum (span-помилка): {}{more}", shown.join(", "));
+    }
+    eprintln!(
+        "--trident-docs: join {} record-ів · openable u16 {openable} → {exported} docnum \
+         ({dropped} поза межами)",
+        b.joined_records,
+        exported = b.exported,
+        openable = b.openable_u16,
+        dropped = b.dropped_u16
+    );
+    let (n, a, out) = (b.exported, b.attached, b.out);
     eprintln!();
     if o.single {
         if o.attach {
@@ -2381,6 +2303,7 @@ pub fn main_cli() {
                   hardening + production marking (v0.39.0: 100-query oracle corpus (tsearch --corpus, ftsearch single-pass oracle_multi, corpus/trident_oracle_100.txt) + TridentError surface (NoMatch/EmptyJoin/OutOfRange, no silent empties, zero panics) + trident status line «Trident-маршрут: production (оракельно підтверджено, roadmap v0.40.0)») \\\
                   .uvt update-cache (v0.40.0: trident uvt [--synth [dir]] — the engine's write-mode per-language update cache (lmsup32.dll FUN_10015340: lm-lang.m 'R' + lm-lang.uvt 'W' + lm-lang.vt 'R'); absent in this read-only base; --synth models the first-open file on a base copy (204B FREE-container form, tail=0, zero body) + search parity check) \\\
                   LMaster FFI driver (v0.41.0: trident lmaster — the i686 ffi32 helper (LoadLibraryW+GetProcAddress facade) drives lmsup32.dll LMaster_*; EXPORTS 4/4 + Lang drivable; Begin/Tran (the DLL join) blocked on the engine's non-exported Lm path global (LmOpen Error); the Rust-reader corpus join is the ground-truth reference) \\\
+                  GUI native-id export button (v0.42.0: the Trident panel export button runs the --trident-docs path - writers::trident_docs_bundle (the tsearch stem-join -> the openable native u16 docnums -> the md bundle with the per-doc native-id evidence line) in a worker thread; the log lines go to the panel result box; the guitest rows=430 baseline holds) \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

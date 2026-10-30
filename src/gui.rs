@@ -100,6 +100,11 @@ pub enum GuiMsg {
     UpdateCmd { idx: usize, total: usize, cmd: String },
     UpdateResult { idx: usize, total: usize, ok: bool, note: String },
     UpdateDone { ok: usize, fail: usize },
+    /// (v0.42.0) the Trident-panel native-id export worker (one at a time,
+    /// guarded by `trident_busy`; no generation field)
+    TridentExportProgress { done: usize, total: usize },
+    TridentExportDone { msg: String },
+    TridentExportFail { msg: String },
 }
 
 /// Field filters read from the UI controls; semantics mirror the CLI.
@@ -724,12 +729,32 @@ pub struct App {
     #[nwg_events(OnButtonClick: [App::on_trident_click_close])]
     trident_close_btn: nwg::Button,
 
+    // ---- native-id export button (v0.42.0, roadmap v0.43.0) --------------
+    // runs the CLI's `--trident-docs` path (the tsearch stem-join → the
+    // openable native u16 docnums → the export bundle with the per-doc
+    // native-id evidence column) in a worker thread; the log lines go to
+    // the panel's result box.
+    #[nwg_control(parent: trident_window, size: (250, 28), position: (10, 346),
+        text: "Експорт (native-id)")]
+    #[nwg_events(OnButtonClick: [App::on_trident_export])]
+    trident_export_btn: nwg::Button,
+
     // plain state (no attributes — derive leaves them untouched)
     baza: PathBuf,
     /// (label, dir) list; grows when the user adds a folder via «База…»
     bases: RefCell<Vec<(String, PathBuf)>>,
     naming: Rc<Naming>,
     rx: RefCell<Option<Receiver<GuiMsg>>>,
+    /// (v0.42.0) one Trident-panel export at a time (the re-entrance guard)
+    trident_busy: RefCell<bool>,
+    /// (v0.42.0) the panel's worker's receiver — a dedicated channel: the
+    /// main-window workers replace `rx`, so the panel's worker must not
+    /// lose its completion messages
+    trident_rx: RefCell<Option<Receiver<GuiMsg>>>,
+    /// (v0.42.0) the Trident panel's displayed text (unix newlines: the
+    /// `trident_chain` + the export log lines; `set_text_unix2dos` at the
+    /// UI boundary)
+    trident_text: RefCell<String>,
     results: RefCell<(Vec<db::Hit>, Vec<Option<fields::DocFields>>)>,
     /// hit indices behind the currently displayed rows
     row_hits: RefCell<Vec<usize>>,
@@ -1590,8 +1615,7 @@ impl App {
         self.trident_q_edit.set_text(&self.query_edit.text());
         let (_label, dir) = self.bases_current();
         self.trident_base_edit.set_text(dir.to_string_lossy().as_ref());
-        self.trident_result
-            .set_text_unix2dos(&self.trident_chain(&self.query_edit.text(), &dir));
+        self.trident_set(&self.trident_chain(&self.query_edit.text(), &dir));
         self.trident_window.set_visible(true);
     }
 
@@ -1599,8 +1623,99 @@ impl App {
     pub fn on_trident_run(&self) {
         let base = PathBuf::from(self.trident_base_edit.text());
         let q = self.trident_q_edit.text();
-        self.trident_result
-            .set_text_unix2dos(&self.trident_chain(&q, &base));
+        self.trident_set(&self.trident_chain(&q, &base));
+    }
+
+    /// (v0.42.0) set the panel's full text (a fresh search resets the log)
+    fn trident_set(&self, text: &str) {
+        *self.trident_text.borrow_mut() = text.to_string();
+        self.trident_result.set_text_unix2dos(text);
+    }
+
+    /// (v0.42.0) append one log line to the panel's text
+    fn trident_append(&self, line: &str) {
+        let mut t = self.trident_text.borrow_mut();
+        if !t.is_empty() {
+            t.push('\n');
+        }
+        t.push_str(line);
+        self.trident_result.set_text_unix2dos(&t);
+    }
+
+    /// (v0.42.0, roadmap v0.43.0) the native-id export button: the panel's
+    /// query + base run the CLI's `--trident-docs` path (the tsearch
+    /// stem-join → the openable native u16 docnums → the export bundle with
+    /// the per-doc native-id evidence column) through the shared
+    /// `writers::trident_docs_bundle`, in a worker thread (the base load +
+    /// rendering must not block the UI); the log lines go to the panel's
+    /// result box. The panel is a separate window, so the guitest
+    /// `rows=430` baseline is untouched.
+    pub fn on_trident_export(&self) {
+        if *self.trident_busy.borrow() {
+            self.trident_append("Експорт уже запущений…");
+            return;
+        }
+        let q = self.trident_q_edit.text().trim().to_string();
+        if q.is_empty() {
+            self.trident_append("Спочатку введіть запит");
+            return;
+        }
+        let base = PathBuf::from(self.trident_base_edit.text().trim());
+        if !base.is_dir() {
+            self.trident_append(&format!("Базу {base:?} не знайдено"));
+            return;
+        }
+        *self.trident_busy.borrow_mut() = true;
+        self.trident_append(&format!(
+            "Експорт (native-id): запуск «{q}» (база: {}, md, auto-lang)…",
+            base.display()
+        ));
+        let naming = (*self.naming).clone();
+        let (tx, rx) = channel();
+        *self.trident_rx.borrow_mut() = Some(rx);
+        thread::spawn(move || {
+            let res = crate::writers::trident_docs_bundle(
+                &base,
+                &q,
+                true,
+                false,
+                &naming,
+                "md",
+                false,
+                false,
+                &crate::highlight::Hl::default(),
+                Some(&|d, t| {
+                    let _ = tx.send(GuiMsg::TridentExportProgress {
+                        done: d,
+                        total: t,
+                    });
+                }),
+            );
+            match res {
+                Ok(b) => {
+                    let missing = if b.missing.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · недоступних docnum: {}", b.missing.len())
+                    };
+                    let msg = format!(
+                        "Експорт (native-id): join {} record-ів · openable u16 {} ({} \
+                         поза межами) → {} документ(ів){missing} → {}",
+                        b.joined_records,
+                        b.openable_u16,
+                        b.dropped_u16,
+                        b.exported,
+                        b.out.display()
+                    );
+                    let _ = tx.send(GuiMsg::TridentExportDone { msg });
+                }
+                Err(e) => {
+                    let _ = tx.send(GuiMsg::TridentExportFail {
+                        msg: format!("Експорт (native-id): {e:#}"),
+                    });
+                }
+            }
+        });
     }
 
     /// The tsearch chain as a display string (v0.36.0):
@@ -2038,6 +2153,40 @@ impl App {
                     }
                 }
                 _ => {} // stale generation, drop
+            }
+        }
+
+        // (v0.42.0) the Trident panel's export events — a dedicated
+        // receiver: the main-window workers replace `rx`, so the panel's
+        // worker keeps its own channel and never loses a completion
+        let tmsgs: Vec<GuiMsg> = {
+            let mut slot = self.trident_rx.borrow_mut();
+            match slot.take() {
+                Some(rx) => {
+                    let mut out = Vec::new();
+                    while let Ok(m) = rx.try_recv() {
+                        out.push(m);
+                    }
+                    *slot = Some(rx);
+                    out
+                }
+                None => Vec::new(),
+            }
+        };
+        for m in tmsgs {
+            match m {
+                GuiMsg::TridentExportProgress { done, total } => {
+                    self.trident_append(&format!("  експорт… {done}/{total}"));
+                }
+                GuiMsg::TridentExportDone { msg } => {
+                    *self.trident_busy.borrow_mut() = false;
+                    self.trident_append(&msg);
+                }
+                GuiMsg::TridentExportFail { msg } => {
+                    *self.trident_busy.borrow_mut() = false;
+                    self.trident_append(&msg);
+                }
+                _ => {}
             }
         }
 

@@ -16,6 +16,68 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.42.0 — 2026-10-30
+
+### UK
+- **GUI: native-id export button (roadmap v0.43.0): панель «Тріант» тепер
+  експортує.** Новий кнопа **«Експорт (native-id)»** у Trident-панелі
+  (окреме модальне вікно, v0.36.0) запускає **шлях `--trident-docs`**
+  (v0.37.0) з GUI: запит + база з панелі → tsearch stem-join → openable
+  native u16 docnums → md-бандл, де **кожен документ несе рядок
+  native-id-довідки** (`нативні u16 (Trident): cand@0x…, cand@0x…`).
+- **Один pipeline, без дублювання** (`writers.rs`): спільна функція
+  `trident_docs_bundle()` (join → openable docnums → бандл з
+  evidence-колонкою) тепер виконує і CLI `export --trident-docs`
+  (рефактор — поведінка збережено, live: «не» → join 32 record-ів ·
+  openable u16 2372 → 967 docnum → 967 файлів), і GUI-кнопа (auto-lang,
+  md). `TridentBundle` — лічильники (joined/openable/dropped/missing/
+  exported/attached) + папка вивантаження.
+- **GUI wiring** (`gui.rs`): кнопа `trident_export_btn` у панелі;
+  воркер-потік (Base-лодіння + рендер не блокує UI) + окремий
+  `trident_rx`-канал (основні воркери замінюють `rx` — воркер панелі
+  не втрачає повідомлення про завершення) + `trident_busy`
+  (re-entrance-захист) + log-рядки в результатне поле панелі
+  (`trident_text`-буфер + `set_text_unix2dos`). Панель — окреме вікно,
+  тому baseline `rows=430` не чіпається.
+- **211 юніт-тестів** (новий: `trident_docs_bundle_exports_the_native_
+  evidence_line` — real-base: «не» → 967 docnum, у КОЖНОМУ документі
+  evidence-рядок). Guitest baseline `rows=430` без змін. Версія
+  **0.41.0 → 0.42.0**.
+- Далі (v0.43.0 / roadmap v0.44.0): інструменти rebuild індексу
+  per-base (запис `.vt`/`.m` з `.mb`-скану).
+
+### EN
+- **GUI: the native-id export button (roadmap v0.43.0): the «Тріант»
+  panel now exports.** A new **«Експорт (native-id)»** button in the
+  Trident panel (the separate modal window, v0.36.0) runs the
+  **`--trident-docs` path** (v0.37.0) from the GUI: the panel's query +
+  base → the tsearch stem-join → the openable native u16 docnums → an
+  md bundle where **every document carries its native-id evidence line**
+  (`нативні u16 (Trident): cand@0x…, cand@0x…`).
+- **One pipeline, no duplication** (`writers.rs`): the shared
+  `trident_docs_bundle()` (join → openable docnums → the bundle with the
+  evidence column) now serves both the CLI `export --trident-docs`
+  (refactor — behavior preserved, live: «не» → 32 joined records ·
+  2372 openable u16 → 967 docnums → 967 files) and the GUI button
+  (auto-lang, md). `TridentBundle` — the counters
+  (joined/openable/dropped/missing/exported/attached) + the output dir.
+- **GUI wiring** (`gui.rs`): the `trident_export_btn` in the panel; a
+  worker thread (the base load + render never blocks the UI) + a
+  dedicated `trident_rx` channel (the main-window workers replace `rx`
+  — the panel's worker must not lose its completion messages) +
+  `trident_busy` (the re-entrance guard) + the log lines in the
+  panel's result box (`trident_text` buffer + `set_text_unix2dos`).
+  The panel is a separate window, so the `rows=430` baseline is
+  untouched.
+- **211 unit tests** (new: `trident_docs_bundle_exports_the_native_
+  evidence_line` — the real base: «не» → 967 docnums, the evidence line
+  in EVERY document). The guitest baseline `rows=430` is unchanged.
+  Version **0.41.0 → 0.42.0**.
+- Next (v0.43.0 / roadmap v0.44.0): the per-base index-rebuild tooling
+  (write `.vt`/`.m` from the `.mb` scan).
+
+---
+
 ## v0.41.0 — 2026-10-30
 
 ### UK

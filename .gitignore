@@ -1,5 +1,8 @@
 # cargo build artifacts (the bulk of the working tree)
 /target
+# the standalone i686 FFI-helper crate's build tree (the built .exe is
+# shipped in-repo under releases/<v>/, so the build tree stays ignored)
+ffi32/target/
 
 # test / self-test artifacts
 /gt_export/

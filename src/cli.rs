@@ -45,7 +45,7 @@ Usage:
           .g graph-template walker (v0.33.0: FUN_10019060 0x27-vertex/0x2d-edge markers + .gw weight map);
           exact Latin mapping (v0.34.0: latin_exact preferred-variant exact path + real-corpus .vt hit rate);
           legacy-engine parity (v0.35.0: lmsup.dll NE 16-bit no-LMaster_* vs lmsup32.dll PE32 LMaster_{{Begin,End,Lang,Tran}});
-          sub-verbs: dump <file> [off] [len] (hex dump, v0.21.0) · uvt [--synth [dir]] (v0.40.0: the .uvt write-mode update-cache status + synth on a base copy);
+          sub-verbs: dump <file> [off] [len] (hex dump, v0.21.0) · uvt [--synth [dir]] (v0.40.0: the .uvt write-mode update-cache status + synth on a base copy) · lmaster [--corpus <file>] [--ffi32 <path>] (v0.41.0: the i686 ffi32 helper drives lmsup32.dll LMaster_*; the Rust-reader corpus join is the ground-truth reference);
           search via tsearch — experimental)
   zakonexport-cli tsearch <query> [--oracle] [--lang u|r|auto] [--fetch N] [--print] [--corpus <file>]
           search the base's native Trident index (SOFT\\lmu.voc + lmur.vt,
@@ -171,6 +171,10 @@ struct Options {
     /// trident uvt: synthesize the absent `.uvt` update caches on a base
     /// copy (never the read-only base itself, v0.40.0)
     uvt_synth: bool,
+    /// trident lmaster: the explicit path to the 32-bit FFI helper exe
+    /// (`lmsup32-ffi32.exe`); when absent the driver locates it
+    /// (v0.41.0, roadmap v0.42.0)
+    ffi32: Option<PathBuf>,
 }
 
 /// v0.26.0: the `.m` section-walker summary line for the `trident` verb
@@ -259,6 +263,7 @@ fn parse_args() -> Options {
         print: false,
         corpus: None,
         uvt_synth: false,
+        ffi32: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
@@ -412,6 +417,12 @@ fn parse_args() -> Options {
                 // absent `.uvt` update caches on a base copy
                 o.uvt_synth = true;
                 i += 1;
+            }
+            "--ffi32" if next(i).is_some() => {
+                // v0.41.0: `trident lmaster --ffi32 <path>` — the explicit
+                // path to the 32-bit FFI helper exe
+                o.ffi32 = Some(PathBuf::from(next(i).unwrap()));
+                i += 2;
             }
             other => {
                 pos.push(other.to_string());
@@ -1655,6 +1666,178 @@ pub fn main_cli() {
                 }
                 return Ok(());
             }
+            // v0.41.0 (roadmap v0.42.0): the `trident lmaster [--corpus <file>]
+            // [--ffi32 <path>]` sub-verb — the Rust LMaster_* driver: the FFI
+            // facade over lmsup32.dll (32-bit PE32; the i686 helper bridges the
+            // 64-bit CLI) + the Rust-side ground-truth join (the cross-check
+            // target for the DLL join, which is blocked on the engine's
+            // non-exported Lm database-path global -> LmOpen Error).
+            if o.positional.first().map(|s| s.as_str()) == Some("lmaster") {
+                require_baza(&o)?;
+                let soft = o.baza.join("SOFT");
+                if !soft.is_dir() {
+                    println!(
+                        "В базі {} немає SOFT\\ (lmsup32.dll) — LMaster-driver не запущений.",
+                        o.baza.display()
+                    );
+                    return Ok(());
+                }
+                println!(
+                    "Trident LMaster-driver (v0.41.0, roadmap v0.42.0): FFI \
+                     facade over lmsup32.dll (32-bit PE32 0x14c; the i686 \
+                     helper bridges the 64-bit CLI)"
+                );
+                println!("  DLL dir (SOFT): {}", soft.display());
+                // 1) the FFI facade: locate the helper + speak the protocol
+                let drv = match crate::lmaster::LmasterDriver::locate(
+                    o.ffi32.as_ref().map(|p| p.as_path()),
+                ) {
+                    Ok(d) => d,
+                    Err(crate::lmaster::LmasterStatus::NoHelper { tried }) => {
+                        println!("  helper: NOT FOUND — candidates tried:");
+                        for p in &tried {
+                            println!("    - {}", p.display());
+                        }
+                        println!(
+                            "  (build: cd ffi32; CC=<i686 mingw gcc> cargo build \
+                             --release --target i686-pc-windows-gnu, or pass \
+                             --ffi32 <path>)"
+                        );
+                        crate::lmaster::LmasterDriver {
+                            helper: std::path::PathBuf::from("<none>"),
+                        }
+                    }
+                    Err(crate::lmaster::LmasterStatus::SpawnError(e)) => {
+                        println!("  helper: spawn error: {e}");
+                        crate::lmaster::LmasterDriver {
+                            helper: std::path::PathBuf::from("<none>"),
+                        }
+                    }
+                    Err(crate::lmaster::LmasterStatus::Ok(_)) => unreachable!(),
+                };
+                println!("  helper: {}", drv.helper.display());
+                let begin = format!("BEGIN {}", o.baza.display());
+                let cmds: Vec<&str> = vec![
+                    "EXPORTS",
+                    begin.as_str(),
+                    "LANG ne",
+                    "TRAN 1024 1",
+                    "END",
+                ];
+                let status = drv.run(soft.to_string_lossy().as_ref(), &cmds);
+                match status {
+                    crate::lmaster::LmasterStatus::Ok(rep) => {
+                        if let Some(ok) = rep.exports_ok {
+                            println!(
+                                "  EXPORTS: {} {}/4 LMaster_* {{Begin,End,Lang,Tran}}",
+                                if ok { "OK" } else { "FAIL" },
+                                rep.exports_resolved
+                            );
+                            if !ok {
+                                if let Some(r) = &rep.exports_reason {
+                                    println!("    reason: {r}");
+                                }
+                            }
+                        }
+                        if let Some(ok) = rep.begin_ok {
+                            if ok {
+                                println!("  BEGIN: OK (engine handle returned)");
+                            } else {
+                                println!(
+                                    "  BEGIN: FAIL — {} [LmOpen Error: the engine's \
+                                     non-exported Lm database-path global \
+                                     (DAT_1002a30c=\"lm.a\") is set only by the \
+                                     legacy app's non-exported init]",
+                                    rep.begin_reason
+                                        .as_deref()
+                                        .unwrap_or("(no reason)")
+                                );
+                            }
+                        }
+                        if !rep.langs.is_empty() {
+                            println!(
+                                "  LANG \"ne\" -> {} (drivable)",
+                                rep.langs.first().copied().unwrap_or(0)
+                            );
+                        }
+                        if !rep.tran_rets.is_empty() {
+                            println!(
+                                "  TRAN: ret={} (DLL join produced output)",
+                                rep.tran_rets.first().copied().unwrap_or(0)
+                            );
+                        }
+                        if !rep.tran_fails.is_empty() {
+                            println!(
+                                "  TRAN: {} (blocked — the DLL join needs BEGIN)",
+                                rep.tran_fails.first().map(String::as_str).unwrap_or("(fail)")
+                            );
+                        }
+                        if let Some(e) = rep.end {
+                            println!("  END: {e} ({})", if rep.begin_ok == Some(true) { "engine released" } else { "never begun" });
+                        }
+                    }
+                    crate::lmaster::LmasterStatus::NoHelper { .. } |
+                    crate::lmaster::LmasterStatus::SpawnError(_) => {
+                        println!("  facade: no helper output (see above)");
+                    }
+                }
+                // 2) the ground-truth join: the Rust reader is the reference
+                //    the DLL join should agree with (once unblocked)
+                let corpus = o
+                    .corpus
+                    .clone()
+                    .or_else(|| {
+                        let p = std::path::PathBuf::from("corpus/trident_oracle_100.txt");
+                        p.is_file().then_some(p)
+                    });
+                match corpus {
+                    Some(cf) => match crate::lmaster::corpus_crosscheck(
+                        &o.baza,
+                        &cf,
+                        crate::trident::Lang::Ukr,
+                    ) {
+                        Ok(joins) => {
+                            let (total, with_docs, union) =
+                                crate::lmaster::corpus_summary(&joins);
+                            println!();
+                            println!(
+                                "Ground-truth join (Rust reader — the cross-check target for the DLL join):"
+                            );
+                            println!(
+                                "  corpus: {} ({} queries, ukr)",
+                                cf.display(),
+                                total
+                            );
+                            println!(
+                                "  queries: {total} · with joined docs: {with_docs} · \
+                                 union of distinct native u16 docs: {union}"
+                            );
+                            println!(
+                                "  (LMaster_Tran, once the Lm path global is \
+                                 unblocked, should agree with this reference)"
+                            );
+                        }
+                        Err(e) => {
+                            println!();
+                            println!("Ground-truth join: {e}");
+                        }
+                    },
+                    None => {
+                        println!();
+                        println!(
+                            "Ground-truth join: run with --corpus <file> \
+                             (default: corpus/trident_oracle_100.txt)"
+                        );
+                    }
+                }
+                println!(
+                    "EN: FFI facade (i686 helper) drives LMaster_* over \
+                     lmsup32.dll; Begin/Tran (the DLL join) are blocked on \
+                     the engine's non-exported Lm path global (LmOpen Error) — \
+                     the Rust reader is the ground-truth join for this version."
+                );
+                return Ok(());
+            }
             // The legacy main app's native FTS indexes (SOFT\): the 16-file
             // inventory plus the parts decoded today — the windows.kod code
             // table, the lm.a case-fold tables, the dictionary records and
@@ -2197,6 +2380,7 @@ pub fn main_cli() {
                   tsearch --fetch [N] / --print (v0.38.0: top-N joined docnums -> title + first-paragraph snippet (search->docnum->document, end-to-end) / GDI printdoc; first_nonempty_line + first_body_line helpers) \\\
                   hardening + production marking (v0.39.0: 100-query oracle corpus (tsearch --corpus, ftsearch single-pass oracle_multi, corpus/trident_oracle_100.txt) + TridentError surface (NoMatch/EmptyJoin/OutOfRange, no silent empties, zero panics) + trident status line «Trident-маршрут: production (оракельно підтверджено, roadmap v0.40.0)») \\\
                   .uvt update-cache (v0.40.0: trident uvt [--synth [dir]] — the engine's write-mode per-language update cache (lmsup32.dll FUN_10015340: lm-lang.m 'R' + lm-lang.uvt 'W' + lm-lang.vt 'R'); absent in this read-only base; --synth models the first-open file on a base copy (204B FREE-container form, tail=0, zero body) + search parity check) \\\
+                  LMaster FFI driver (v0.41.0: trident lmaster — the i686 ffi32 helper (LoadLibraryW+GetProcAddress facade) drives lmsup32.dll LMaster_*; EXPORTS 4/4 + Lang drivable; Begin/Tran (the DLL join) blocked on the engine's non-exported Lm path global (LmOpen Error); the Rust-reader corpus join is the ground-truth reference) \\\
                 Повнопошуковий пошук — search/export (власний fold-codec FTS)."
             );
             Ok(())

@@ -561,6 +561,44 @@ changelog; zero panics on the corpus; release v0.40.0 (bilingual
 CHANGELOG + `changes.md` in `releases/v0.40.0/`, console-only); guitest
 rows=430.
 
+## v0.42.0 — Rust `LMaster_*` driver (the FFI facade)
+
+**Pitch.** Drive the legacy `lmsup32.dll` engine through a Rust FFI facade
+(a 32-bit helper — a 64-bit process cannot `LoadLibrary` a 32-bit PE32)
+and cross-check the DLL join against the Rust join on the 100-query
+corpus (UA+EN).
+
+**Evidence.** `lmsup32.dll` = PE32 x86 (0x14c), self-contained (imports
+only KERNEL32/USER32/ADVAPI32; it does NOT depend on the 16-bit
+`lmsup.dll`). The i686 helper resolves all four `LMaster_*` exports
+(`EXPORTS OK 4/4`) and `LMaster_Lang` is drivable ("ne" → 69).
+`LMaster_Begin`/`LMaster_Tran` (the DLL join) are **blocked** on the
+engine's non-exported Lm database-path global `DAT_1002a30c` = "lm.a"
+(`LmOpen Error` in the engine's `lm.log`; CWD=SOFT is correct and the
+files are readable, so it is the engine's internal file/DB layer, not a
+path problem) — documented, not a defect. The Rust-side ground-truth join
+(`TridentIndex` over the 100-query corpus: 100 queries · 13 with joined
+docs · 8176 distinct native u16 docs) is shipped as the reference the DLL
+join must agree with once the Lm path global is unblocked.
+
+**Rust surface.** `lmaster.rs`: the `LMaster*` C-ABI aliases, the pure
+protocol-line parser (`parse_lm_line`/`parse_report`),
+`LmasterDriver::locate`/`run` (zero-panic; the `--ffi32` / `ZAKON_FFI32`
+env / exe-dir / cwd / in-repo search trail) and
+`corpus_crosscheck`/`corpus_summary` (the Rust-side ground truth). New CLI
+sub-verb `trident lmaster [--corpus <file>] [--ffi32 <path>]`. The i686
+helper (`ffi32/lmsup32-ffi32.exe`, ~983 KB, zero external deps) is
+committed as the 4th release asset; it builds through a self-contained
+winlibs mingw (rustup does not bundle the i686 self-contained linker).
+
+**Effort:** M.
+
+**Definition of done.** The FFI facade (4/4 + Lang) demonstrated; the
+DLL-join blocker documented (UA+EN); the Rust-side ground-truth join
+recorded (100 queries · 13 with docs · 8176 distinct u16); release
+v0.41.0 (bilingual CHANGELOG + `changes.md` in `releases/v0.41.0/`,
+console-only, the 4th asset = the i686 helper); guitest rows=430.
+
 ### Beyond v0.40.0 (sketches, not scheduled)
 
 - v0.41.0 — `.uvt` behavior: the engine's write-mode per-language update

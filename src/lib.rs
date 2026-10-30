@@ -15,6 +15,7 @@ pub mod ftsearch;
 pub mod g_graph;
 pub mod gui;
 pub mod highlight;
+pub mod lmaster;
 pub mod naming;
 pub mod pdf;
 pub mod picker;

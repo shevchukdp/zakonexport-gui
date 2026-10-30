@@ -1,0 +1,24 @@
+[package]
+name = "lmsup32-ffi32"
+version = "0.41.0"
+edition = "2021"
+# The 32-bit FFI facade host (roadmap v0.42.0 / shipped v0.41.0).
+#
+# lmsup32.dll is a 32-bit PE32 (machine 0x14C I386); a 64-bit process cannot
+# LoadLibrary it (ERROR_BAD_FORMAT). This i686 helper loads the DLL, resolves
+# the LMaster_* exports, and drives them over a line-based stdin/stdout
+# protocol that the 64-bit `zakonexport-cli` speaks.
+#
+# Build (i686, self-contained mingw):
+#   CC=C:/temp/opencode/mingwi686ok/mingw32/bin/i686-w64-mingw32-gcc.exe \
+#     cargo build --release --target i686-pc-windows-gnu
+# The produced i686 .exe is committed to the repo / release assets so the
+# 64-bit CLI can find and spawn it without an i686 toolchain at run time.
+
+[[bin]]
+name = "lmsup32-ffi32"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+strip = true

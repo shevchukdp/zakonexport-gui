@@ -182,6 +182,38 @@ Version history — in **CHANGELOG.md**: every entry UK + EN, the GitHub
 release pages carry the same notes (UK + EN).
 
 Поточний / Current:
+- **v0.41.0** — **Rust `LMaster_*` driver (roadmap v0.42.0)**: FFI-facade
+для `lmsup32.dll` (32-бітний PE32 0x14c — 64-бітний процес не може
+LoadLibrary-ти його, err 126): **32-бітний helper**
+`ffi32/lmsup32-ffi32.exe` (i686; 4-й release-асет
+`lmsup32-ffi32-0.41.0.exe`) + новий sub-verb
+`trident lmaster [--corpus <file>] [--ffi32 <path>]`:
+`EXPORTS OK 4/4` (`LMaster_{Begin,End,Lang,Tran}`) + `LMaster_Lang`
+drivable («ne» → 69); `LMaster_Begin`/`Tran` (DLL-join) **blocked** на
+не-експортованій Lm-шлях-глобальній рушія `DAT_1002a30c`="lm.a"
+(`LmOpen Error` — задокументовано, не дефект); **ground-truth join —
+Rust-side**: `corpus_crosscheck` через `TridentIndex` на 100-запитному
+корпусі (100 запитів · 13 з joined docs · 8176 distinct native u16
+docs) — детермінований референс для DLL-join. Rust: `lmaster.rs`
+(C-ABI type-aliases `LMaster*`, чистий protocol-parser
+`parse_lm_line`/`parse_report`, `LmasterDriver::locate`/`run`
+zero-panic, `corpus_crosscheck`/`corpus_summary`), 210 юніт-тестів. /
+  **Rust `LMaster_*` driver (roadmap v0.42.0):** the FFI facade over
+  `lmsup32.dll` (a 32-bit PE32 0x14c — a 64-bit process cannot
+  LoadLibrary it, err 126): the **32-bit helper**
+  `ffi32/lmsup32-ffi32.exe` (i686; the 4th release asset
+  `lmsup32-ffi32-0.41.0.exe`) + the new sub-verb `trident lmaster
+  [--corpus <file>] [--ffi32 <path>]`: `EXPORTS OK 4/4`
+  (`LMaster_{Begin,End,Lang,Tran}`) + `LMaster_Lang` drivable ("ne" →
+  69); `LMaster_Begin`/`Tran` (the DLL join) **blocked** on the
+  engine's non-exported Lm path global `DAT_1002a30c`="lm.a" (`LmOpen
+  Error` — documented, not a defect); the **ground-truth join is the
+  Rust-side** `corpus_crosscheck` through `TridentIndex` over the
+  100-query corpus (100 queries · 13 with joined docs · 8176 distinct
+  native u16 docs) — the deterministic reference for the DLL join.
+  Rust: `lmaster.rs` (the `LMaster*` C-ABI aliases, the pure protocol
+  parser `parse_lm_line`/`parse_report`, `LmasterDriver::locate`/`run`
+  zero-panic, `corpus_crosscheck`/`corpus_summary`), 210 unit tests.
 - **v0.40.0** — **поведення `.uvt` (roadmap v0.41.0)**: write-mode
   per-language update cache (рушій відкриває `lm{lang}.uvt` лише на
   запис; у read-only базі файл відсутній). Новий sub-verb

@@ -16,6 +16,101 @@ Rule for every new version (UA + EN):
 
 ---
 
+## v0.41.0 — 2026-10-30
+
+### UK
+- **Rust `LMaster_*` driver (roadmap v0.42.0): FFI-facade для
+  `lmsup32.dll`.** `lmsup32.dll` — 32-бітний PE32 (machine 0x14c I386,
+  imports лише KERNEL32/USER32/ADVAPI32 — самодостатній, НЕ залежить від
+  16-бітного `lmsup.dll`); 64-бітний процес не може його `LoadLibraryW`
+  (ERROR_BAD_FORMAT / err 126). Тому рушій працює через **32-бітний
+  helper** `ffi32/lmsup32-ffi32.exe` (i686, commited як release-асет):
+  `LoadLibraryW` + `GetProcAddress` (FFI-facade, 4/4 експортів) +
+  лінійний stdin/stdout-протокол (перший рядок = папка DLL;
+  `EXPORTS`/`BEGIN`/`LANG`/`TRAN`/`END`/`DIAG`/`BYE`).
+- **Новий CLI sub-verb `trident lmaster [--corpus <file>] [--ffi32 <path>]`.**
+  - **Facade**: `EXPORTS OK 4/4` (`LMaster_{Begin,End,Lang,Tran}`);
+    `LMaster_Lang` drivable (`"ne"` → 69).
+  - **`LMaster_Begin`/`LMaster_Tran` (DLL-join) blocked**: `BEGIN FAIL` →
+    `LmOpen Error` (кореневий факт: `lm.log` рушія). Причина —
+    **не-експортована** статична глобальна `DAT_1002a30c` (`"lm.a"`,
+    off=172812, imageBase 0x10000000), яку виставляє лише не-експортована
+    init legacy-застосунку; 4 експортів Lm-шлях БД не налаштовують.
+    CWD=SOFT коректний, `lm.a`/`windows.kod` читаються (helper `DIAG`) —
+    тобто внутрішній file/DB-шар рушія, а не шлях. **Задокументовано, не
+    дефект.**
+  - **Ground-truth join (Rust-side cross-check)**: `corpus_crosscheck()`
+    через `TridentIndex` (власний рушій-зчитувач експортера) на 100-
+    запитному корпусі: **100 запитів · 13 з joined docs · 8176 distinct
+    native u16 docs** — детермінований референс, з яким `LMaster_Tran`
+    має збігатися, коли Lm-шлях-глобальна буде unblocked.
+- **Rust surface** (`src/lmaster.rs`): `LMaster*` type-aliases (C-ABI,
+  decompiled shape з `lmsup32_all.c`); `LmLine` + `parse_lm_line` (чистий
+  protocol-parser); `LmasterReport` + `parse_report`;
+  `LmasterDriver::locate` (`--ffi32` → env `ZAKON_FFI32` → біля exe → cwd →
+  in-repo build-шлях; `NoHelper`-статус зі шляхом пошуку, zero-panic) +
+  `run` (spawn + protocol); `CorpusJoin`/`corpus_crosscheck`/
+  `corpus_summary` (Rust-side ground truth).
+- **Новий (4-й) release-асет**: `lmsup32-ffi32-0.41.0.exe` (i686 PE 0x14c,
+  ~983 KB) — 32-бітний helper. i686-збірка через self-contained winlibs
+  mingw (`C:\temp\opencode\mingwi686ok`, `CC` +
+  `CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER`); в репо committed джерело
+  `ffi32/` (helper збігається окремо, не частина основного build).
+- **210 юніт-тестів** (нові 8 у `lmaster`: 6 protocol-parser +
+  `locate_reports_no_helper_with_a_trail` + `corpus_summary_counts`).
+  Guitest baseline `rows=430` без змін. Версія **0.40.0 → 0.41.0**.
+- Далі (v0.42.0 / roadmap v0.43.0): GUI — native-id export button
+  (panel → шлях `--trident-docs`).
+
+### EN
+- **Rust `LMaster_*` driver (roadmap v0.42.0): the FFI facade over
+  `lmsup32.dll`.** `lmsup32.dll` is a 32-bit PE32 (machine 0x14c I386,
+  imports only KERNEL32/USER32/ADVAPI32 — self-contained, does NOT depend
+  on the 16-bit `lmsup.dll`); a 64-bit process cannot `LoadLibraryW` it
+  (ERROR_BAD_FORMAT / err 126). So the driver runs through the **32-bit
+  helper** `ffi32/lmsup32-ffi32.exe` (i686, committed as a release asset):
+  `LoadLibraryW` + `GetProcAddress` (the FFI facade, 4/4 exports) + a
+  line-based stdin/stdout protocol (first line = the DLL dir;
+  `EXPORTS`/`BEGIN`/`LANG`/`TRAN`/`END`/`DIAG`/`BYE`).
+- **New CLI sub-verb `trident lmaster [--corpus <file>] [--ffi32 <path>]`.**
+  - **Facade**: `EXPORTS OK 4/4` (`LMaster_{Begin,End,Lang,Tran}`);
+    `LMaster_Lang` is drivable (`"ne"` → 69).
+  - **`LMaster_Begin`/`LMaster_Tran` (the DLL join) are blocked**:
+    `BEGIN FAIL` → `LmOpen Error` (root evidence: the engine's `lm.log`).
+    Cause — the **non-exported** static global `DAT_1002a30c` (`"lm.a"`,
+    off=172812, imageBase 0x10000000), set only by the legacy app's
+    non-exported init; the four exports do not configure the Lm database
+    path. CWD=SOFT is correct and `lm.a`/`windows.kod` are readable
+    (helper `DIAG`) — it is the engine's internal file/DB layer, not a
+    path problem. **Documented, not a defect.**
+  - **Ground-truth join (the Rust-side cross-check)**:
+    `corpus_crosscheck()` through `TridentIndex` (the exporter's own
+    reader) over the 100-query corpus: **100 queries · 13 with joined
+    docs · 8176 distinct native u16 docs** — the deterministic reference
+    `LMaster_Tran` must agree with once the Lm path global is unblocked.
+- **Rust surface** (`src/lmaster.rs`): the `LMaster*` type aliases (the
+  C ABI, the decompiled shapes from `lmsup32_all.c`); `LmLine` +
+  `parse_lm_line` (the pure protocol parser); `LmasterReport` +
+  `parse_report`; `LmasterDriver::locate` (`--ffi32` → the `ZAKON_FFI32`
+  env → next to the exe → cwd → the in-repo build path; the `NoHelper`
+  status with the search trail, zero-panic) + `run` (spawn + protocol);
+  `CorpusJoin`/`corpus_crosscheck`/`corpus_summary` (the Rust-side ground
+  truth).
+- **New (4th) release asset**: `lmsup32-ffi32-0.41.0.exe` (the i686 PE
+  0x14c, ~983 KB) — the 32-bit helper. The i686 build goes through a
+  self-contained winlibs mingw (`C:\temp\opencode\mingwi686ok`, via `CC`
+  + `CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER`); the repo carries the
+  `ffi32/` source (the helper builds separately, not part of the main
+  build).
+- **210 unit tests** (8 new in `lmaster`: the 6 protocol-parser +
+  `locate_reports_no_helper_with_a_trail` + `corpus_summary_counts`).
+  The guitest baseline `rows=430` is unchanged. Version **0.40.0 →
+  0.41.0**.
+- Next (v0.42.0 / roadmap v0.43.0): the GUI — the native-id export button
+  (the panel → the `--trident-docs` path).
+
+---
+
 ## v0.40.0 — 2026-10-29
 
 ### UK
